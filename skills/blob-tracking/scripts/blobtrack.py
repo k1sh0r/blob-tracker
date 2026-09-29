@@ -555,7 +555,12 @@ def _span(start, duration):
 
 
 def read_frames(path, info, start=None, duration=None):
-    """Yield decoded RGB frames (HxWx3 uint8) one at a time from an ffmpeg pipe."""
+    """Yield decoded RGB frames (HxWx3 uint8) one at a time from an ffmpeg pipe.
+
+    Callers that may stop before the last frame should wrap the generator in
+    contextlib.closing(...) (as run() does), so the ffmpeg process is closed
+    and reaped at once rather than whenever the generator is garbage-collected.
+    """
     W, H = info["width"], info["height"]
     cmd = (["ffmpeg", "-v", "error", "-nostdin"] + _span(start, duration)
            + ["-i", path, "-map", "0:%d" % info["vindex"]])
@@ -595,9 +600,14 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
     if with_audio:
         cmd += _span(start, duration) + ["-i", src]
     cmd += ["-map", "0:v:0"] + (["-map", "1:a:0"] if with_audio else [])
-    cmd += ["-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2,scale=out_color_matrix=bt709:out_range=tv",
+    # Tag BT.709 on the frames (setparams) and in the H.264 VUI (x264-params).
+    # The -color_* options alone are not enough: ffmpeg 7 takes colour
+    # properties from the frames, and scale leaves primaries/transfer unset.
+    cmd += ["-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2,scale=out_color_matrix=bt709:out_range=tv,"
+                   "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv",
             "-c:v", "libx264", "-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p",
-            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+            "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
+            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
     if with_audio:
         cmd += ["-c:a", "copy"] if info["audio"] in MP4_AUDIO else ["-c:a", "aac", "-b:a", "192k"]
     cmd += ["-movflags", "+faststart", dst]

@@ -90,6 +90,8 @@ def test_cli_preserves_frames_fps_duration_and_audio(tmp_path):
     assert vo["r_frame_rate"] == vi["r_frame_rate"] == "30/1"
     assert (vo["width"], vo["height"]) == (1080, 1920)
     assert vo["codec_name"] == "h264" and vo["pix_fmt"] == "yuv420p"
+    assert (vo.get("color_space"), vo.get("color_primaries"), vo.get("color_transfer"), vo.get("color_range")) \
+        == ("bt709", "bt709", "bt709", "tv")
     assert abs(do - di) < 0.1, (do, di)
     assert len(ai) == 1 and len(ao) == 1
     assert ao[0]["codec_name"] == ai[0]["codec_name"] == "aac"      # copied, not dropped
