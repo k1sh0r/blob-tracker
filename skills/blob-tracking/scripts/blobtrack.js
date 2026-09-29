@@ -35,9 +35,11 @@
 //   script-src  https://cdn.jsdelivr.net (or wherever `url` points) 'wasm-unsafe-eval'
 //   connect-src / font-src  the font's origin (it is fetched, then used as a FontFace)
 //
-// Errors: if process() throws for any reason (bad input included), the tracker
-// is left unusable -- its state may be half-advanced -- and every later
-// process() throws a BlobTrackError; dispose() still works. Make a new tracker.
+// Errors: a bad argument to process() (wrong-size or malformed ImageData, no
+// output context) throws a BlobTrackError/TypeError before anything changes,
+// and the tracker stays usable. A failure after that point may leave its state
+// half-advanced, so the tracker becomes unusable: every later process() throws
+// a BlobTrackError; dispose() still works. Make a new tracker.
 //
 // Test hooks: tests/parity.html drives these internals directly, so keep their
 // names and meaning stable: `S`, `frame`, `hist`, `gray()`, `_setPts()`,
@@ -113,24 +115,46 @@ function withTimeout(promise, ms, message) {
   ]);
 }
 
+/**
+ * Wait for an OpenCV.js <script> someone else added (another copy of this
+ * module, or the page). `cv` was undefined when we looked, so the tag is still
+ * loading, or it finished without defining `cv` (failed). Settle at once when
+ * we can tell which: our own tags carry data-blobtrack="loading|loaded|error";
+ * for a foreign tag, a finished resource-timing entry means its load is over.
+ */
+function waitForTag(tag, url, timeout) {
+  const failed = () => new Error(`the existing <script src="${url}"> failed to load OpenCV.js`);
+  const state = tag.dataset.blobtrack;
+  if (state === "error") return Promise.reject(failed());
+  if (state === "loaded" || globalThis.cv) return Promise.resolve();
+  if (state !== "loading") {
+    const entry = performance.getEntriesByName(tag.src, "resource").pop();
+    if (entry && entry.responseEnd > 0) {
+      // fetched: an async script runs right after its fetch, so give it one task to define cv
+      return new Promise(r => setTimeout(r, 0)).then(() => { if (!globalThis.cv) throw failed(); });
+    }
+  }
+  return withTimeout(new Promise((resolve, reject) => {
+    tag.addEventListener("load", resolve, { once: true });
+    tag.addEventListener("error", () => reject(failed()), { once: true });
+  }), timeout, `the existing <script src="${url}"> did not finish within ${timeout} ms`);
+}
+
 async function loadCv(url, timeout) {
   if (typeof document === "undefined") throw new Error("loadOpenCV runs on the main thread only (it adds a <script> tag)");
   if (!globalThis.cv) {
     const abs = new URL(url, document.baseURI).href;
     const existing = [...document.scripts].find(s => s.src === abs);
-    if (existing) {
-      // someone (another copy of this module, the page) is already loading it
-      await withTimeout(new Promise((resolve, reject) => {
-        existing.addEventListener("load", resolve, { once: true });
-        existing.addEventListener("error", () => reject(new Error(`could not load OpenCV.js from ${url}`)), { once: true });
-      }), timeout, `the existing <script src="${url}"> did not finish within ${timeout} ms`);
-    } else {
+    if (existing) await waitForTag(existing, url, timeout);
+    else {
       await new Promise((resolve, reject) => {
         const s = document.createElement("script");
         s.src = url;
         s.async = true;
-        s.onload = resolve;
+        s.dataset.blobtrack = "loading";             // lets another loader see how this tag ended
+        s.onload = () => { s.dataset.blobtrack = "loaded"; resolve(); };
         s.onerror = () => {
+          s.dataset.blobtrack = "error";
           s.remove();                                // so a retry starts clean
           reject(new Error(`could not load OpenCV.js from ${url}`));
         };
@@ -635,7 +659,8 @@ export class BlobTracker {
   // --------------------------------------------------------------- process
   /**
    * Treat one frame; frames must arrive in order.
-   * If this throws, the tracker becomes unusable (see the header); make a new one.
+   * Bad arguments throw and leave the tracker usable; any later failure makes it
+   * unusable (see the header).
    * @param {ImageData} imageData  the input frame, width x height RGBA
    * @param {CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D} outCtx  receives the treated
    *        frame at (0, 0), 1:1 whatever its current transform (it is reset for the draw and restored)
@@ -644,15 +669,7 @@ export class BlobTracker {
     if (this._disposed) throw new BlobTrackError("this BlobTracker has been disposed");
     if (this._broken)
       throw new BlobTrackError(`tracker is unusable after an error; create a new one (first error: ${this._broken.message || this._broken})`);
-    try {
-      this._process(imageData, outCtx);
-    } catch (e) {
-      this._broken = e;
-      throw e;
-    }
-  }
-
-  _process(imageData, outCtx) {
+    // argument checks: nothing has changed yet, so these leave the tracker usable
     if (!imageData || !imageData.data)
       throw new BlobTrackError(`process() needs an ImageData, got ${imageData}`);
     if (imageData.width !== this.W || imageData.height !== this.H)
@@ -661,6 +678,15 @@ export class BlobTracker {
       throw new BlobTrackError(`expected ${this.W * this.H * 4} bytes of RGBA, got ${imageData.data.length}`);
     if (!outCtx || typeof outCtx.putImageData !== "function")
       throw new TypeError("process(imageData, outCtx) needs a 2D canvas context to draw into");
+    try {
+      this._process(imageData, outCtx);
+    } catch (e) {
+      this._broken = e;          // state may be half-advanced from here on
+      throw e;
+    }
+  }
+
+  _process(imageData, outCtx) {
     const g = this.gray(imageData);
     let tracks, pts;
     try {

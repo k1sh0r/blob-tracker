@@ -137,20 +137,33 @@ window.PARITY = {
     if (got !== want) throw new Error(`BlobTracker(${w}, ${h}, ${JSON.stringify(p)}) gave ${got}, expected ${want}`);
   }
   if (MATS.live !== base) throw new Error("rejected constructors leaked Mats");
-  // poison-on-throw: a failed process() leaves the tracker unusable, dispose() still frees everything
+  // bad arguments throw but leave the tracker usable ...
   {
     const t = new BlobTracker(64, 64), ctx = new OffscreenCanvas(64, 64).getContext("2d");
     t.process(new ImageData(64, 64), ctx);
-    let first = null, second = null;
-    try { t.process(new ImageData(32, 32), ctx); } catch (e) { first = e; }
-    try { t.process(new ImageData(64, 64), ctx); } catch (e) { second = e; }
-    if (!first || first.name !== "BlobTrackError" || !/expected a 64x64 frame/.test(first.message))
-      throw new Error(`wrong-size frame gave ${first && first.message}`);
-    if (!second || second.name !== "BlobTrackError" || !/unusable after an error; create a new one/.test(second.message))
-      throw new Error(`call after an error gave ${second ? second.message : "no error"}`);
+    let err = null;
+    try { t.process(new ImageData(32, 32), ctx); } catch (e) { err = e; }
+    if (!err || err.name !== "BlobTrackError" || !/expected a 64x64 frame/.test(err.message))
+      throw new Error(`wrong-size frame gave ${err ? err.message : "no error"}`);
+    t.process(new ImageData(64, 64), ctx);          // must still work
+    if (t.frame !== 2) throw new Error(`tracker at frame ${t.frame} after two good frames`);
     t.dispose();
-    if (MATS.live !== base) throw new Error(`dispose() after an error left ${MATS.live - base} live Mats`);
   }
+  // ... a failure mid-pipeline poisons it; dispose() still frees every Mat
+  {
+    const t = new BlobTracker(64, 64), ctx = new OffscreenCanvas(64, 64).getContext("2d");
+    t.process(new ImageData(64, 64), ctx);
+    const canny = cv.Canny;
+    let first = null, second = null;
+    cv.Canny = () => { throw new Error("induced Canny failure"); };
+    try { t.process(new ImageData(64, 64), ctx); } catch (e) { first = e; } finally { cv.Canny = canny; }
+    try { t.process(new ImageData(64, 64), ctx); } catch (e) { second = e; }
+    if (!first || first.message !== "induced Canny failure") throw new Error(`induced failure gave ${first && first.message}`);
+    if (!second || second.name !== "BlobTrackError" || !/unusable after an error; create a new one/.test(second.message))
+      throw new Error(`call after a mid-pipeline failure gave ${second ? second.message : "no error"}`);
+    t.dispose();
+  }
+  if (MATS.live !== base) throw new Error(`error-path trackers left ${MATS.live - base} live Mats after dispose()`);
   log(`opencv ready in ${(performance.now() - t0).toFixed(0)} ms; Mat counter, validation and poison-on-throw self-tests ok`);
   window.PARITY.loadMs = performance.now() - t0;
   window.PARITY.ready = true;
