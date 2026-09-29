@@ -350,7 +350,11 @@ IoU > 0.9 with the same ID, and equal corner counts.
 
 ## 9. Mapping the method onto other tools
 
-The honest options, from most to least faithful:
+This section is guidance: only the Python and browser implementations are
+tested in this repository, and none of the tool mappings below (TouchDesigner,
+After Effects, Resolve/Fusion, Remotion, HyperFrames, Unity/Unreal,
+p5.js/Processing) has been tried here. The options, from most to least
+faithful:
 
 1. **Bake, then composite.** Run the CLI (or the Python module) on the exact
    frames the tool will show, and import the result as footage. Pixel-exact,
@@ -364,7 +368,9 @@ The honest options, from most to least faithful:
    (invert/shift) need pixel access; approximate them with an adjustment
    layer masked to the box. The JSON is in output px of the analysed frame
    size, so the drawing layer must use that same frame size.
-3. **Reimplement natively.** Map the steps to the tool's primitives:
+3. **Reimplement natively.** Map the steps to the tool's primitives. The
+   table names each tool's likely building blocks; it is untested, so check
+   each primitive's behaviour against sections 3 to 6:
 
 | step | TouchDesigner | Unity / Unreal / shader | p5.js / Processing |
 |---|---|---|---|
@@ -376,6 +382,6 @@ The honest options, from most to least faithful:
 | strokes + chips | Script SOP/TOP or Text TOP + Rectangle TOP | UI / line renderer / SDF text | `line`, `rect`, `text` |
 | screen composite | Composite TOP, operation Screen | blend `One, OneMinusSrcColor` | `blendMode(SCREEN)` |
 
-TouchDesigner's Blob Track TOP gives the general look quickly but its
+TouchDesigner's Blob Track TOP should give the general look quickly, but its
 detections and IDs will not match this method; follow sections 3 and 4 for
 the same boxes.

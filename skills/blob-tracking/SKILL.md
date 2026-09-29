@@ -19,8 +19,8 @@ Two implementations produce the same detections (a parity test checks this):
 
 Both need `scripts/JetBrainsMono-Regular.ttf` beside them for the label font.
 Paths below are relative to this skill's directory (the folder holding this
-file). In shell commands it is `$SKILL_DIR`, so set it first, e.g.
-`SKILL_DIR=/absolute/path/to/blob-tracking`.
+file). Commands and code below call it `$SKILL_DIR`, so export it first, e.g.
+`export SKILL_DIR=/absolute/path/to/blob-tracking`.
 
 ## Pick the path that fits the project
 
@@ -56,7 +56,9 @@ lists them. It prints `output.mp4: N frames` and exits 1 with a one-line
 The first run after installing is slower (Python compiles and loads the
 packages once); later runs go at the speeds under Performance.
 
-For a quick look before a full render, process two seconds and grab a still:
+For a quick look before a full render, process two seconds and grab a still.
+Pick a `--start` inside the clip (it fails with "no frames decoded" when the
+start is past the end; use `--start 0` for short clips):
 
 ```sh
 python "$SKILL_DIR/scripts/blobtrack.py" input.mp4 -o preview.mp4 --start 3 --duration 2
@@ -71,7 +73,7 @@ project (the font is looked up beside the module). Frames are
 `H x W x 3` **RGB** `uint8` arrays fed in order, one tracker per clip:
 
 ```python
-import sys; sys.path.insert(0, "SKILL_DIR/scripts")          # the real path
+import os, sys; sys.path.insert(0, os.path.join(os.environ["SKILL_DIR"], "scripts"))
 from blobtrack import BlobTracker, probe, read_frames
 from PIL import Image
 
@@ -152,18 +154,21 @@ Getting frames:
   OPFS as described in `references/traps.md`. `app/app.js` in the source
   repository (github.com/k1sh0r/blob-tracker) is the complete, tested
   version: progress, errors, OPFS output, timestamp checks.
-- **Live `<video>` / webcam**: drawing the element each
-  `requestVideoFrameCallback` works, but the tracker runs at about
-  13 frames/s at 1080x1920, so playback frames get skipped and motion and
-  optical flow see bigger jumps than in an offline render. For a faithful
-  result, render offline as above.
+- **Live `<video>` / webcam** (not measured): drawing the element each
+  `requestVideoFrameCallback` should work, but at about 77 ms/frame expect
+  roughly 13 frames/s at 1080x1920, so expect playback frames to be skipped
+  and motion and optical flow to see bigger jumps than in an offline render.
+  For a faithful result, render offline as above.
 
 Errors: a bad argument to `process()` throws and leaves the tracker usable;
 any later failure makes it unusable (create a new one). See `traps.md`.
 
 ### D. Other tools
 
-Choose by what the tool can do:
+Only the Python and browser implementations are tested in this repository.
+The tool-specific advice below (TouchDesigner, After Effects, Resolve/Fusion,
+Remotion, HyperFrames, Unity/Unreal, p5.js/Processing) is guidance that has
+not been tested here. Choose by what the tool can do:
 
 1. **Bake, then composite** (works everywhere, pixel-exact): run path A on
    the exact frames the edit will use and import the result as footage.
@@ -216,7 +221,7 @@ Tuning:
 
 ## Output contract
 
-- CLI: H.264 MP4 (yuv420p, BT.709, CRF 16, `+faststart`), same frame size
+- CLI: H.264 MP4 (yuv420p, BT.709 matrix, CRF 16, `+faststart`), same frame size
   (odd sizes lose one pixel to stay H.264-legal), same frame rate and frame
   count as the input (variable-frame-rate sources are resampled to their
   average rate), audio stream copied (re-encoded to AAC only if the codec

@@ -177,6 +177,5 @@ In HTML/React video frameworks (HyperFrames, Remotion and similar), the
 robust route is to bake the effect with the CLI and place the baked video as
 a clip. Keep every clip's duration a whole number of **output** frames
 (`frames / fps`); a duration that is not a whole number of frames can render
-as blank frames or drift by one frame against the analysis, and only a full
-render shows it. Render once and scrub the cut points before trusting a
+as blank frames, and only a full render shows it. Render once and scrub the cut points before trusting a
 preview.
