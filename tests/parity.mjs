@@ -36,7 +36,7 @@ const CLIPS = ["shapes", "pan"];
 const SHOW_FRAME = 40;               // the frame rendered for eyeballing
 const LEAK_FROM = 10;                // live-Mat count must not grow after this frame
 const MIN_MATCH = 0.95, MIN_IOU = 0.9, MAX_PT_DEV = 0.5;
-const LOAD_TIMEOUT = 180_000, CLIP_TIMEOUT = 600_000;
+const LOAD_TIMEOUT = 180_000, CLIP_TIMEOUT = 120_000;
 
 // ------------------------------------------------------------ static server
 const TYPES = {
@@ -79,6 +79,9 @@ function iou(a, b) {                 // same formula as blobtrack.py
 
 function compareClip(ref, js) {
   const fails = [];
+  if (js.frames.length !== ref.frame_count || ref.tracks.length !== ref.frame_count || ref.points.length !== ref.frame_count)
+    return { fails: [`frame counts differ: JS processed ${js.frames.length}, reference.json has frame_count ` +
+      `${ref.frame_count} with ${ref.tracks.length} track and ${ref.points.length} point frames`], stats: null };
   let pyTotal = 0, matched = 0, sameId = 0, iouSum = 0, kindDiff = 0, maxDev = 0, maxStep = 0, drifted = 0, ptTotal = 0;
   for (let f = 0; f < ref.frame_count; f++) {
     const py = ref.tracks[f], got = js.frames[f].tracks;
@@ -150,7 +153,11 @@ function pythonSide(clip, jsPng) {
   const r = spawnSync(py, [join(ROOT, "tests", "parity_render.py"), clip, String(SHOW_FRAME), jsPng, OUT],
     { encoding: "utf8", timeout: 300_000 });
   if (r.status !== 0) return { note: `Python render failed: ${(r.stderr || r.error || "").toString().trim()}` };
-  return JSON.parse(r.stdout.trim().split("\n").pop());
+  try {
+    return JSON.parse(r.stdout.trim().split("\n").pop());
+  } catch {
+    return { note: `Python render printed no result line: ${r.stdout.trim().slice(-200)}` };
+  }
 }
 
 // --------------------------------------------------------------------- main
@@ -162,7 +169,15 @@ const t0 = Date.now();
 const stamp = () => `+${((Date.now() - t0) / 1000).toFixed(1)}s`;
 console.log(`serving ${ROOT} on :${port}`);
 
-const browser = await chromium.launch({ channel: "chrome", headless: true });
+let browser;
+try {
+  browser = await chromium.launch({ channel: "chrome", headless: true });
+} catch (e) {
+  console.error("Could not start Google Chrome. This test drives the system Chrome (playwright channel " +
+    "\"chrome\"); install Google Chrome from https://www.google.com/chrome/ and re-run.\n\n" + e.message);
+  server.close();
+  process.exit(1);
+}
 let failed = false;
 try {
   const page = await browser.newPage();
@@ -185,16 +200,21 @@ try {
     await writeFile(jsPng, Buffer.from(js.showPng, "base64"));
     const { fails, stats } = compareClip(ref, js);
     const pyside = pythonSide(clip, jsPng);
-    rows.push({ clip, W: js.W, H: js.H, stats, pyside, fails });
+    rows.push({ clip, W: js.W, H: js.H, n: ref.frame_count, stats, pyside, fails });
     if (fails.length) failed = true;
   }
 
   console.log("\n==== parity: blobtrack.js vs blobtrack.py ====");
-  for (const { clip, W, H, stats: s, pyside, fails } of rows) {
-    console.log(`\n${clip} (${W}x${H}, ${s.pyTracks} Python tracks over 60 frames): ${fails.length ? "FAIL" : "PASS"}`);
+  for (const { clip, W, H, n, stats: s, pyside, fails } of rows) {
+    if (!s) {
+      console.log(`\n${clip} (${W}x${H}): FAIL`);
+      for (const f of fails) console.log("  - " + f);
+      continue;
+    }
+    console.log(`\n${clip} (${W}x${H}, ${s.pyTracks} Python tracks over ${n} frames): ${fails.length ? "FAIL" : "PASS"}`);
     console.log(`  matched IoU>${MIN_IOU}      ${s.matchPct.toFixed(2)} %   (same ID ${s.sameIdPct.toFixed(2)} %)`);
     console.log(`  mean IoU of matches  ${s.meanIoU.toFixed(6)}   kind differs on ${s.kindDiff}`);
-    console.log(`  max point deviation  ${s.maxStepDev.toExponential(2)} px for one step from Python's points (gated <= ${MAX_PT_DEV})`);
+    console.log(`  one-step point dev   ${s.maxStepDev.toExponential(2)} px for one step from Python's points (gated <= ${MAX_PT_DEV})`);
     console.log(`  end-to-end points    ${s.maxPointDev.toExponential(2)} px max, ${s.drifted} over ${MAX_PT_DEV} px -- informational — native NEON vs scalar-wasm float drift on low-texture corners; re-syncs at re-seed`);
     console.log(`  ms/frame             JS ${s.jsMsMean.toFixed(1)} (median ${s.jsMsMedian.toFixed(1)})` +
       (pyside.pyMsMean ? `   Python ${pyside.pyMsMean.toFixed(1)} (median ${pyside.pyMsMedian.toFixed(1)})` : ""));

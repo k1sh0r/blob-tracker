@@ -105,7 +105,7 @@ window.PARITY = {
         heapBytes: cv.HEAPU8.buffer.byteLength,
       });
       if (i === showFrame) showPng = await toBase64Png(out.canvas);
-      if (i % 10 === 9) log(`${clip}: frame ${i + 1}/${ref.frame_count}, ${ms.toFixed(0)} ms`);
+      if (i % 10 === 9 || i === ref.frame_count - 1) log(`${clip}: frame ${i + 1}/${ref.frame_count}, ${ms.toFixed(0)} ms`);
       await tick();                       // keep the page responsive to the driver
     }
     bt.dispose();
@@ -137,7 +137,21 @@ window.PARITY = {
     if (got !== want) throw new Error(`BlobTracker(${w}, ${h}, ${JSON.stringify(p)}) gave ${got}, expected ${want}`);
   }
   if (MATS.live !== base) throw new Error("rejected constructors leaked Mats");
-  log(`opencv ready in ${(performance.now() - t0).toFixed(0)} ms; Mat counter self-test ok`);
+  // poison-on-throw: a failed process() leaves the tracker unusable, dispose() still frees everything
+  {
+    const t = new BlobTracker(64, 64), ctx = new OffscreenCanvas(64, 64).getContext("2d");
+    t.process(new ImageData(64, 64), ctx);
+    let first = null, second = null;
+    try { t.process(new ImageData(32, 32), ctx); } catch (e) { first = e; }
+    try { t.process(new ImageData(64, 64), ctx); } catch (e) { second = e; }
+    if (!first || first.name !== "BlobTrackError" || !/expected a 64x64 frame/.test(first.message))
+      throw new Error(`wrong-size frame gave ${first && first.message}`);
+    if (!second || second.name !== "BlobTrackError" || !/unusable after an error; create a new one/.test(second.message))
+      throw new Error(`call after an error gave ${second ? second.message : "no error"}`);
+    t.dispose();
+    if (MATS.live !== base) throw new Error(`dispose() after an error left ${MATS.live - base} live Mats`);
+  }
+  log(`opencv ready in ${(performance.now() - t0).toFixed(0)} ms; Mat counter, validation and poison-on-throw self-tests ok`);
   window.PARITY.loadMs = performance.now() - t0;
   window.PARITY.ready = true;
 })().catch(e => {
