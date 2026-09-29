@@ -330,7 +330,6 @@ def test_reference_json_is_current(shapes_frames, pan_frames):
                     reason="set BLOBTRACK_TEASER_DIR to the original teaser tools/ directory to run")
 def test_matches_teaser_original(shapes_frames):
     """At 1080x1920 with the teaser config, detections, tracks, corners and pixels match the original."""
-    skip_unless_reference_opencv()
     sys.dont_write_bytecode = True                      # the teaser repo is read-only
     try:
         sys.path.insert(0, os.path.dirname(TEASER_TOOL))
