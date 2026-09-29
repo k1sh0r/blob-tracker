@@ -1,5 +1,3 @@
-# Minimums are the versions the test suite was run with.
-# OpenCV is held to 4.x so detections match the browser build (OpenCV.js 4.10).
-numpy>=2.5.3
-opencv-python-headless>=4.10.0.84,<5
-pillow>=12.3.0
+numpy>=1.24
+opencv-python-headless>=4.8,<5
+pillow>=10.1
