@@ -25,7 +25,23 @@
 //   bt.dispose();                             // frees the OpenCV Mats it holds
 //
 // Frames must be fed in order, one tracker per clip. Plain ES module, no build
-// step; runs on the main thread (it injects a <script> for OpenCV.js).
+// step. Main thread only: loadOpenCV injects a <script> and uses document.fonts.
+//
+// Files: ship JetBrainsMono-Regular.ttf beside this module (or pass `fontUrl`)
+// for labels identical to the Python tool. Without it loadOpenCV warns and the
+// chips fall back to the browser's `monospace`; detections are unaffected.
+//
+// Content-Security-Policy, if the page has one, must allow:
+//   script-src  https://cdn.jsdelivr.net (or wherever `url` points) 'wasm-unsafe-eval'
+//   connect-src / font-src  the font's origin (it is fetched, then used as a FontFace)
+//
+// Errors: if process() throws for any reason (bad input included), the tracker
+// is left unusable -- its state may be half-advanced -- and every later
+// process() throws a BlobTrackError; dispose() still works. Make a new tracker.
+//
+// Test hooks: tests/parity.html drives these internals directly, so keep their
+// names and meaning stable: `S`, `frame`, `hist`, `gray()`, `_setPts()`,
+// `_corners()`.
 
 export const OPENCV_URL =
   "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js";
@@ -63,15 +79,20 @@ export class BlobTrackError extends Error {
 // ================================================================ loading
 let loading = null;
 let ready = false;
+let fontFamily = "monospace";     // becomes FONT_FAMILY once the .ttf has loaded
 
 /**
  * Load OpenCV.js and the label font. Idempotent: every call returns the same
- * promise; a failed load can be retried.
+ * promise, and the options of the first call win (later calls' options are
+ * ignored). After a failure, the next call retries. A missing font only warns
+ * (labels fall back to `monospace`); an OpenCV failure rejects.
  *
  * @param {object} [opts]
  * @param {string} [opts.url]      OpenCV.js build to load (default: jsDelivr); self-host for offline use
  * @param {string} [opts.fontUrl]  JetBrainsMono-Regular.ttf (default: beside this module)
- * @param {number} [opts.timeout]  ms to wait for the wasm runtime to initialise (default 120000)
+ * @param {number} [opts.timeout]  ms to wait for an already-present <script> tag to finish and for
+ *                                 the wasm runtime to initialise (default 120000); the download of a
+ *                                 script this call injects is bounded by the browser, not this
  * @returns {Promise<void>}        resolves with nothing -- see the note on `cv` below
  */
 export function loadOpenCV(opts = {}) {
@@ -84,17 +105,38 @@ export function loadOpenCV(opts = {}) {
   return loading;
 }
 
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
+  ]);
+}
+
 async function loadCv(url, timeout) {
+  if (typeof document === "undefined") throw new Error("loadOpenCV runs on the main thread only (it adds a <script> tag)");
   if (!globalThis.cv) {
-    if (typeof document === "undefined") throw new Error("loadOpenCV needs a window (it adds a <script> tag)");
-    await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = url;
-      s.async = true;
-      s.onload = resolve;
-      s.onerror = () => reject(new Error(`could not load OpenCV.js from ${url}`));
-      document.head.appendChild(s);
-    });
+    const abs = new URL(url, document.baseURI).href;
+    const existing = [...document.scripts].find(s => s.src === abs);
+    if (existing) {
+      // someone (another copy of this module, the page) is already loading it
+      await withTimeout(new Promise((resolve, reject) => {
+        existing.addEventListener("load", resolve, { once: true });
+        existing.addEventListener("error", () => reject(new Error(`could not load OpenCV.js from ${url}`)), { once: true });
+      }), timeout, `the existing <script src="${url}"> did not finish within ${timeout} ms`);
+    } else {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = url;
+        s.async = true;
+        s.onload = resolve;
+        s.onerror = () => {
+          s.remove();                                // so a retry starts clean
+          reject(new Error(`could not load OpenCV.js from ${url}`));
+        };
+        document.head.appendChild(s);
+      });
+    }
   }
   const cv = globalThis.cv;
   if (!cv) throw new Error(`${url} loaded but did not define cv`);
@@ -103,26 +145,29 @@ async function loadCv(url, timeout) {
   // forever: an endless microtask loop that freezes the tab outright. Wait for
   // the runtime callback instead, then remove `then` so nobody can trip on it.
   if (!cv.Mat) {
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`OpenCV.js runtime did not initialise within ${timeout} ms`)), timeout);
+    await withTimeout(new Promise(resolve => {
       const prev = cv.onRuntimeInitialized;
       cv.onRuntimeInitialized = () => {
-        clearTimeout(timer);
         if (typeof prev === "function") prev();
         resolve();
       };
-    });
+    }), timeout, `OpenCV.js runtime did not initialise within ${timeout} ms`);
   }
   delete cv.then;
 }
 
 async function loadFont(url) {
-  const fonts = globalThis.document ? document.fonts : globalThis.fonts;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`could not load the label font from ${url} (HTTP ${res.status})`);
-  const face = new FontFace(FONT_FAMILY, await res.arrayBuffer());
-  await face.load();
-  fonts.add(face);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const face = new FontFace(FONT_FAMILY, await res.arrayBuffer());
+    await face.load();
+    document.fonts.add(face);
+    fontFamily = FONT_FAMILY;
+  } catch (e) {
+    console.warn(`blobtrack: could not load the label font from ${url} (${e.message || e}); ` +
+      "labels fall back to monospace. Ship JetBrainsMono-Regular.ttf beside blobtrack.js or pass fontUrl.");
+  }
 }
 
 // ================================================================ helpers
@@ -223,41 +268,59 @@ export class BlobTracker {
     this.capW = this.W * 560 / 1080;
     this.capH = this.H * 760 / 1920;
     this.label = 18 * this.k;
-    this._kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
-    this._kernel9 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(9, 9));
-    this._rgba = new cv.Mat(this.H, this.W, cv.CV_8UC4);    // reused input buffer
+    this._font = `${this.label}px ${fontFamily}`;
 
-    // drawing surfaces, reused every frame
+    // drawing surfaces, reused every frame (made before any Mat, which could leak)
     const canvas = () => (typeof OffscreenCanvas !== "undefined"
       ? new OffscreenCanvas(this.W, this.H)
       : Object.assign(document.createElement("canvas"), { width: this.W, height: this.H }));
     this._strokes = canvas().getContext("2d");
     this._chips = canvas().getContext("2d");
-    this._chips.font = `${this.label}px ${FONT_FAMILY}`;
+    if (!this._strokes || !this._chips) throw new Error("could not create a 2D canvas context");
+    this._chips.font = this._font;
     this._ascent = this._chips.measureText("Ag").fontBoundingBoxAscent;   // Pillow draws text from the ascender
     this._out = new ImageData(this.W, this.H);
+
+    const made = [];                                  // freed if a later allocation throws
+    const keep = m => { made.push(m); return m; };
+    try {
+      this._kernel = keep(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5)));
+      this._kernel9 = keep(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(9, 9)));
+      this._rgba = keep(new cv.Mat(this.H, this.W, cv.CV_8UC4));   // reused input buffer
+      this.pts = keep(new cv.Mat());                  // corner points, CV_32FC2, one per row
+    } catch (e) {
+      for (const m of made) m.delete();
+      throw e;
+    }
 
     this.frame = 0;          // index of the next frame
     this.tracks = [];
     this.nextId = 1;
     this.hist = [];          // last three working-res greys (cv.Mat), oldest first
-    this.pts = new cv.Mat(); // corner points, CV_32FC2, one per row
     this.reseeds = [];       // frame indices at which corners were (re)seeded
     this.lastTracks = [];
     this.lastPoints = [];
     this._disposed = false;
+    this._broken = null;     // the error that made this tracker unusable
   }
 
   // ---------------------------------------------------------------- detect
   gray(imageData) {
     this._rgba.data.set(imageData.data);
     const g = new cv.Mat();
-    cv.cvtColor(this._rgba, g, cv.COLOR_RGBA2GRAY);   // same weights as RGB2GRAY
-    if (this.W === this.work[0] && this.H === this.work[1]) return g;
-    const small = new cv.Mat();
-    cv.resize(g, small, new cv.Size(this.work[0], this.work[1]), 0, 0, cv.INTER_LINEAR);
-    g.delete();
-    return small;
+    let small = null;
+    try {
+      cv.cvtColor(this._rgba, g, cv.COLOR_RGBA2GRAY);   // same weights as RGB2GRAY
+      if (this.W === this.work[0] && this.H === this.work[1]) return g;
+      small = new cv.Mat();
+      cv.resize(g, small, new cv.Size(this.work[0], this.work[1]), 0, 0, cv.INTER_LINEAR);
+      g.delete();
+      return small;
+    } catch (e) {
+      if (!g.isDeleted()) g.delete();
+      if (small) small.delete();
+      throw e;
+    }
   }
 
   _components(mask, amin, amax, kind) {
@@ -392,7 +455,12 @@ export class BlobTracker {
     }
     if (this.frame === 0 || this.pts.rows < n / 2 || this.frame % RESEED_EVERY === 0) {
       const p = new cv.Mat();
-      if (n > 0) cv.goodFeaturesToTrack(g, p, n, 0.02, 22);   // maxCorners 0 would mean "no limit"
+      try {
+        if (n > 0) cv.goodFeaturesToTrack(g, p, n, 0.02, 22);   // maxCorners 0 would mean "no limit"
+      } catch (e) {
+        p.delete();
+        throw e;
+      }
       this._setPts(p);
       this.reseeds.push(this.frame);
     }
@@ -465,6 +533,10 @@ export class BlobTracker {
     const cen = tracks.map(t => [t.x + t.w / 2, t.y + t.h / 2]);
     const idx = cen.map((_, j) => j);
     const drawn = new Set();
+    // Two nearest neighbours by sorting every centroid for every centroid:
+    // O(n^2 log n), which is fine because the quotas keep n <= large + medium +
+    // small (32 by default). A spatial index would not preserve the stable-sort
+    // tie order Python uses, so keep it literal.
     cen.forEach((c, i) => {
       const dist = j => (cen[j][0] - c[0]) ** 2 + (cen[j][1] - c[1]) ** 2;
       const near = [...idx].sort((a, b) => dist(a) - dist(b)).slice(1, 3);   // stable sort
@@ -491,7 +563,7 @@ export class BlobTracker {
       }
     });
 
-    dc.font = `${L}px ${FONT_FAMILY}`;
+    dc.font = this._font;
     dc.textBaseline = "alphabetic";
     const text = (s, x, y) => { dc.fillStyle = "#000"; dc.fillText(s, x, y + this._ascent); };
     const fill = (x0, y0, x1, y1) => { dc.fillStyle = "#fff"; dc.fillRect(x0, y0, x1 - x0 + 1, y1 - y0 + 1); };
@@ -548,8 +620,9 @@ export class BlobTracker {
    * first line; the chips layer is plain source-over at the chip opacity.
    */
   _composite(outCtx) {
-    outCtx.putImageData(this._out, 0, 0);
+    outCtx.putImageData(this._out, 0, 0);         // ignores the transform
     outCtx.save();
+    outCtx.setTransform(1, 0, 0, 1, 0, 0);        // the layers are frame-sized: draw them 1:1
     outCtx.globalCompositeOperation = "screen";
     outCtx.globalAlpha = this.cfg.screen;
     outCtx.drawImage(this._strokes.canvas, 0, 0);
@@ -562,13 +635,30 @@ export class BlobTracker {
   // --------------------------------------------------------------- process
   /**
    * Treat one frame; frames must arrive in order.
-   * @param {ImageData} imageData  the input frame, width x height
-   * @param {CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D} outCtx  receives the treated frame
+   * If this throws, the tracker becomes unusable (see the header); make a new one.
+   * @param {ImageData} imageData  the input frame, width x height RGBA
+   * @param {CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D} outCtx  receives the treated
+   *        frame at (0, 0), 1:1 whatever its current transform (it is reset for the draw and restored)
    */
   process(imageData, outCtx) {
-    if (this._disposed) throw new Error("this BlobTracker has been disposed");
-    if (!imageData || imageData.width !== this.W || imageData.height !== this.H)
-      throw new BlobTrackError(`expected a ${this.W}x${this.H} frame, got ${imageData ? `${imageData.width}x${imageData.height}` : imageData}`);
+    if (this._disposed) throw new BlobTrackError("this BlobTracker has been disposed");
+    if (this._broken)
+      throw new BlobTrackError(`tracker is unusable after an error; create a new one (first error: ${this._broken.message || this._broken})`);
+    try {
+      this._process(imageData, outCtx);
+    } catch (e) {
+      this._broken = e;
+      throw e;
+    }
+  }
+
+  _process(imageData, outCtx) {
+    if (!imageData || !imageData.data)
+      throw new BlobTrackError(`process() needs an ImageData, got ${imageData}`);
+    if (imageData.width !== this.W || imageData.height !== this.H)
+      throw new BlobTrackError(`expected a ${this.W}x${this.H} frame, got ${imageData.width}x${imageData.height}`);
+    if (imageData.data.length !== this.W * this.H * 4)
+      throw new BlobTrackError(`expected ${this.W * this.H * 4} bytes of RGBA, got ${imageData.data.length}`);
     if (!outCtx || typeof outCtx.putImageData !== "function")
       throw new TypeError("process(imageData, outCtx) needs a 2D canvas context to draw into");
     const g = this.gray(imageData);
