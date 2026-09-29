@@ -1,0 +1,13 @@
+{
+  "name": "blob-tracker",
+  "private": true,
+  "type": "module",
+  "description": "Blob-tracking video effect: Python CLI/module, browser ES module, web app.",
+  "license": "MIT",
+  "scripts": {
+    "test:parity": "node tests/parity.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
+  }
+}

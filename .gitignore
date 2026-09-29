@@ -12,3 +12,6 @@ tests/_out/
 
 # OS
 .DS_Store
+
+# Node
+node_modules/
