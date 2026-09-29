@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blob tracker parity harness</title>
+<link rel="icon" href="data:,">
+<style>body { background: #111; color: #ccc; font: 13px monospace; padding: 16px; }</style>
+</head>
+<body>
+<p>Parity harness for <code>blobtrack.js</code>. Driven by <code>tests/parity.mjs</code>; exposes
+<code>window.PARITY</code>. Nothing to see here.</p>
+<pre id="log"></pre>
+<script>
+// ---- live OpenCV Mat counter (independent of blobtrack.js) -------------------
+// Every embind object handle -- `new cv.Mat()`, and every Mat a cv function
+// returns -- is made by embind's makeClassHandle via Object.create(proto, {$$}).
+// Count the ones whose prototype is cv.Mat.prototype, and count deletes by
+// wrapping cv.Mat.prototype.delete once OpenCV is up. live = made - deleted.
+// This runs before any module code, so it sees every Mat the tracker makes.
+window.MATS = { made: 0, deleted: 0, get live() { return this.made - this.deleted; } };
+(() => {
+  const create = Object.create;
+  Object.create = function (proto, props) {
+    const o = create.apply(this, arguments);
+    if (props && props.$$ && window.cv && window.cv.Mat && proto === window.cv.Mat.prototype) window.MATS.made++;
+    return o;
+  };
+})();
+function hookMatDelete() {
+  const del = cv.Mat.prototype.delete;
+  cv.Mat.prototype.delete = function () {
+    if (!this.isDeleted()) window.MATS.deleted++;
+    return del.call(this);
+  };
+}
+</script>
+<script type="module">
+import { loadOpenCV, BlobTracker } from "../skills/blob-tracking/scripts/blobtrack.js";
+
+const log = (...a) => {
+  const s = a.join(" ");
+  console.log("[page] " + s);
+  document.getElementById("log").textContent += s + "\n";
+};
+const tick = () => new Promise(r => setTimeout(r, 0));
+
+async function decodePng(url, ctx) {
+  const blob = await (await fetch(url)).blob();
+  // Opaque PNGs without colour chunks; ask for the raw pixels anyway.
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  return ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
+}
+
+async function toBase64Png(canvas) {
+  const blob = await canvas.convertToBlob({ type: "image/png" });
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+window.PARITY = {
+  ready: false,
+  error: null,
+  // Run a fresh tracker over one fixture clip; returns per-frame results.
+  async runClip(clip, showFrame) {
+    const ref = await (await fetch(`fixtures/${clip}/reference.json`)).json();
+    const { width: W, height: H } = ref;
+    const src = new OffscreenCanvas(W, H).getContext("2d", { willReadFrequently: true });
+    const out = new OffscreenCanvas(W, H).getContext("2d");
+    const liveBefore = MATS.live;
+    const bt = new BlobTracker(W, H, ref.params);
+    // A second tracker isolates one step of the corner stage: each frame its
+    // own _corners() starts from Python's previous-frame points (not its own),
+    // so float drift cannot accumulate and any difference is this frame's.
+    const probe = new BlobTracker(W, H, ref.params);
+    let prevGray = null;
+    const frames = [];
+    let showPng = null;
+    for (let i = 0; i < ref.frame_count; i++) {
+      const img = await decodePng(`fixtures/${ref.frames_dir}/${String(i).padStart(4, "0")}.png`, src);
+      const t0 = performance.now();
+      bt.process(img, out);
+      const ms = performance.now() - t0;
+      const g = probe.gray(img);
+      probe.frame = i;
+      probe.hist = prevGray ? [prevGray] : [];
+      if (i > 0) {
+        const prev = ref.points[i - 1].flatMap(([x, y]) => [x * probe.S, y * probe.S]);
+        probe._setPts(prev.length ? cv.matFromArray(prev.length / 2, 1, cv.CV_32FC2, prev) : new cv.Mat());
+      }
+      const stepPoints = probe._corners(g);
+      probe.hist = [];
+      if (prevGray) prevGray.delete();
+      prevGray = g;
+      frames.push({
+        stepPoints,
+        tracks: bt.lastTracks.map(({ id, x, y, w, h, kind, a }) => ({ id, x, y, w, h, kind, a })),
+        points: bt.lastPoints,
+        ms,
+        liveMats: MATS.live - liveBefore,
+        heapBytes: cv.HEAPU8.buffer.byteLength,
+      });
+      if (i === showFrame) showPng = await toBase64Png(out.canvas);
+      if (i % 10 === 9) log(`${clip}: frame ${i + 1}/${ref.frame_count}, ${ms.toFixed(0)} ms`);
+      await tick();                       // keep the page responsive to the driver
+    }
+    bt.dispose();
+    probe.dispose();
+    prevGray.delete();
+    return { clip, W, H, frames, showPng, liveAfterDispose: MATS.live - liveBefore };
+  },
+};
+
+(async () => {
+  const url = new URLSearchParams(location.search).get("opencv") || undefined;
+  const t0 = performance.now();
+  await loadOpenCV(url ? { url } : {});
+  await loadOpenCV();                     // idempotent: must resolve again, not reload
+  hookMatDelete();
+  // self-test the counter so a zero leak reading means something
+  const base = MATS.live;
+  const m1 = new cv.Mat(), m2 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+  const seen = MATS.live - base;
+  m1.delete(); m2.delete();
+  if (seen !== 2 || MATS.live !== base) throw new Error(`Mat counter self-test failed: saw ${seen}, left ${MATS.live - base}`);
+  // parameter validation mirrors blobtrack.py: each of these must throw
+  const bad = [[59, 100, {}, "BlobTrackError"], [100, 100, { bright: 101 }, "BlobTrackError"],
+    [100, 100, { large: 1.5 }, "BlobTrackError"], [100, 100, { labels: true }, "BlobTrackError"],
+    [100, 100, { motion: NaN }, "BlobTrackError"], [100, 100, { nope: 1 }, "TypeError"]];
+  for (const [w, h, p, want] of bad) {
+    let got = "no error";
+    try { new BlobTracker(w, h, p).dispose(); } catch (e) { got = e.name; }
+    if (got !== want) throw new Error(`BlobTracker(${w}, ${h}, ${JSON.stringify(p)}) gave ${got}, expected ${want}`);
+  }
+  if (MATS.live !== base) throw new Error("rejected constructors leaked Mats");
+  log(`opencv ready in ${(performance.now() - t0).toFixed(0)} ms; Mat counter self-test ok`);
+  window.PARITY.loadMs = performance.now() - t0;
+  window.PARITY.ready = true;
+})().catch(e => {
+  window.PARITY.error = String(e && e.stack || e);
+  log("ERROR " + window.PARITY.error);
+});
+</script>
+</body>
+</html>
