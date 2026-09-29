@@ -5,7 +5,9 @@
   "description": "Blob-tracking video effect: Python CLI/module, browser ES module, web app.",
   "license": "MIT",
   "scripts": {
-    "test:parity": "node tests/parity.mjs"
+    "serve": "sh app/serve.sh",
+    "test:parity": "node tests/parity.mjs",
+    "test:app": "node tests/app-smoke.mjs"
   },
   "devDependencies": {
     "playwright-core": "^1.63.0"
