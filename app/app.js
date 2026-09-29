@@ -48,8 +48,9 @@
 // Without OPFS writable streams (older Safari) it falls back to a BufferTarget
 // (whole file in RAM, plus one copy into a Blob) and warns when the estimated
 // output is large. Each run's OPFS file is removed when the next run starts
-// or another file is chosen; files left over by a closed tab are removed on
-// load once they are a day old (younger ones may belong to another open tab).
+// or another file is chosen, and (best effort) on pagehide; files left over
+// anyway are removed on load once they are a day old (younger ones may belong
+// to another open tab).
 
 import { loadOpenCV, BlobTracker, MIN_SIDE } from "../skills/blob-tracking/scripts/blobtrack.js";
 
@@ -196,6 +197,14 @@ addEventListener("beforeunload", e => {
   if (busy) e.preventDefault();          // ask before throwing away a running job
 });
 
+// Best effort: drop the finished result's OPFS file when the page goes away (not awaited).
+addEventListener("pagehide", () => {
+  if (outName && opfsSupported()) {
+    const name = outName;
+    navigator.storage.getDirectory().then(dir => dir.removeEntry(name)).catch(() => {});
+  }
+});
+
 function webCodecsProblem() {
   if (typeof VideoDecoder === "undefined" || typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined")
     return "This browser does not support WebCodecs, which the app needs to decode and encode video. " +
@@ -209,11 +218,11 @@ function webCodecsProblem() {
 async function chooseFile(file) {
   if (busy || !file) return;
   const token = ++probeToken;
+  ui.process.disabled = true;           // before any await: no Process click on the old file meanwhile
+  current = null;
   clearError();
   await clearResult();
   ui.progressBox.hidden = true;
-  ui.process.disabled = true;
-  current = null;
   ui.info.hidden = false;
   ui.info.textContent = `${file.name} — reading…`;
   setState("probing");
@@ -400,7 +409,8 @@ async function run() {
     if (opfs) {
       // A failed Conversion.execute cancels the output, which closes the stream; if we never got that far,
       // the stream is still open and must be aborted before the file can be removed.
-      if (output && output.state !== "canceled" && output.state !== "finalized") await output.cancel().catch(() => {});
+      // cancel() is a no-op once finalized and returns the in-flight promise while already canceling.
+      await output?.cancel().catch(() => {});
       await opfs.writable.abort().catch(() => {});
       await removeOpfsFile(opfs.name);
     }
