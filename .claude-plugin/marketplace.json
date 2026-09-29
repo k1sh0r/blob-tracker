@@ -1,0 +1,24 @@
+{
+  "name": "blob-tracker",
+  "description": "The blob-tracking video effect (TouchDesigner Blob Track look) as a Claude skill: CLI, Python module, browser module and a porting spec.",
+  "owner": {
+    "name": "Kishor",
+    "url": "https://github.com/k1sh0r"
+  },
+  "plugins": [
+    {
+      "name": "blob-tracking",
+      "source": "./skills/blob-tracking",
+      "description": "Add the blob-tracking effect to a video: boxes that follow objects, connecting lines, numbered chips, screen-blended. Picks the CLI, Python, browser or porting path that fits your project.",
+      "author": {
+        "name": "Kishor",
+        "url": "https://github.com/k1sh0r"
+      },
+      "homepage": "https://github.com/k1sh0r/blob-tracker",
+      "repository": "https://github.com/k1sh0r/blob-tracker",
+      "license": "MIT",
+      "keywords": ["video", "effect", "blob-tracking", "computer-vision", "opencv", "touchdesigner", "motion-graphics"],
+      "category": "media"
+    }
+  ]
+}
