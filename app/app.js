@@ -36,38 +36,70 @@
 //     Either way `sample.displayWidth/Height` is the upright size, so the
 //     tracker is sized from the first sample and every sample is checked
 //     against it.
+//
+// Output storage. The MP4 is written through a Mediabunny `StreamTarget` into a
+// file in the origin-private file system (OPFS): StreamTarget writes
+// `{type: "write", data, position}` chunks, which is exactly what a
+// FileSystemWritableFileStream accepts, and closes the stream on finalize
+// (commit) or cancel. `fastStart: false` puts the moov box at the end, so the
+// muxer never holds the whole file in RAM; with `chunked: true` it buffers at
+// most a few 16 MiB chunks. The committed OPFS `File` backs both the preview's
+// object URL and the download, so a long clip costs disk space, not memory.
+// Without OPFS writable streams (older Safari) it falls back to a BufferTarget
+// (whole file in RAM, plus one copy into a Blob) and warns when the estimated
+// output is large. Each run's OPFS file is removed when the next run starts
+// or another file is chosen; files left over by a closed tab are removed on
+// load once they are a day old (younger ones may belong to another open tab).
 
 import { loadOpenCV, BlobTracker, MIN_SIDE } from "../skills/blob-tracking/scripts/blobtrack.js";
 
 const MEDIABUNNY_URL = "https://cdn.jsdelivr.net/npm/mediabunny@1.60.0/dist/bundles/mediabunny.min.mjs";
+const OPFS_PREFIX = "blobtrack-";        // our output files in OPFS
+const STALE_MS = 24 * 3600 * 1000;       // leftovers older than this are removed on load
+const WARN_BYTES = 1e9;                  // in-memory fallback: warn above ~1 GB of output
+// ?target=memory forces the in-memory fallback (used by tests/app-smoke.mjs).
+const FORCE_MEMORY = new URLSearchParams(location.search).get("target") === "memory";
 
 const $ = id => document.getElementById(id);
 const ui = {
   drop: $("drop"), file: $("file"), info: $("info"), process: $("process"),
   progressBox: $("progress-box"), progress: $("progress"), status: $("status"),
-  error: $("error"), result: $("result"), output: $("output"), download: $("download"),
+  error: $("error"), warning: $("warning"), result: $("result"), output: $("output"),
+  download: $("download"), announce: $("announce"),
 };
 
 let mb = null;            // the Mediabunny module
 let current = null;       // { file, W, H, frames, fps, duration, audio } of the chosen file
 let resultUrl = null;     // object URL of the last output
+let outName = null;       // OPFS file name of the last output
 let busy = false;         // a conversion is running
 let probeToken = 0;       // ignores stale probes when files are picked quickly
 
 function setState(state) { document.body.dataset.state = state; }
 
+// Screen readers hear only outcomes (done, failed), not the per-frame status.
+function announce(text) { ui.announce.textContent = text; }
+
 function showError(message) {
   ui.error.textContent = message;
   ui.error.hidden = false;
+  announce(message);
   setState("error");
 }
 
 function clearError() {
   ui.error.hidden = true;
   ui.error.textContent = "";
+  ui.warning.hidden = true;
+  ui.warning.textContent = "";
 }
 
-function clearResult() {
+function showWarning(message) {
+  ui.warning.textContent = message;
+  ui.warning.hidden = false;
+}
+
+async function clearResult() {
   ui.result.hidden = true;
   ui.output.removeAttribute("src");
   ui.output.load();
@@ -75,12 +107,78 @@ function clearResult() {
   if (resultUrl) URL.revokeObjectURL(resultUrl);
   resultUrl = null;
   delete document.body.dataset.frames;
+  if (outName) await removeOpfsFile(outName);
+  outName = null;
 }
 
 function fmtTime(s) {
   if (!Number.isFinite(s)) return "--";
-  const m = Math.floor(s / 60);
-  return m ? `${m}:${(s % 60).toFixed(0).padStart(2, "0")}` : `${s.toFixed(1)} s`;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const r = Math.round(s);
+  return `${Math.floor(r / 60)}:${String(r % 60).padStart(2, "0")}`;
+}
+
+// --------------------------------------------------------------- OPFS output
+function opfsSupported() {
+  return !FORCE_MEMORY && typeof navigator.storage?.getDirectory === "function"
+    && typeof FileSystemFileHandle !== "undefined" && "createWritable" in FileSystemFileHandle.prototype;
+}
+
+async function removeOpfsFile(name) {
+  try {
+    await (await navigator.storage.getDirectory()).removeEntry(name);
+  } catch (e) {
+    if (e.name !== "NotFoundError") console.warn(`could not remove OPFS file ${name}:`, e);
+  }
+}
+
+async function removeStaleOutputs() {
+  if (!opfsSupported()) return;
+  try {
+    const dir = await navigator.storage.getDirectory();
+    for await (const [name, handle] of dir.entries()) {
+      if (!name.startsWith(OPFS_PREFIX) || handle.kind !== "file") continue;
+      const file = await handle.getFile().catch(() => null);
+      if (file && Date.now() - file.lastModified > STALE_MS) await removeOpfsFile(name);
+    }
+  } catch (e) {
+    console.warn("could not clean up old OPFS outputs:", e);
+  }
+}
+
+/** A fresh OPFS file with an open writable stream, or null when OPFS is unusable. */
+async function openOpfsOutput() {
+  if (!opfsSupported()) return null;
+  const name = `${OPFS_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`;
+  try {
+    const dir = await navigator.storage.getDirectory();
+    const handle = await dir.getFileHandle(name, { create: true });
+    return { name, handle, writable: await handle.createWritable() };
+  } catch (e) {
+    console.warn("OPFS unavailable, keeping the output in memory:", e);
+    await removeOpfsFile(name);
+    return null;
+  }
+}
+
+/**
+ * Rough output size in bytes: Mediabunny 1.60.0's bitrate for Quality "high"
+ * (src/encode.ts computeVideoBitrate: 3 Mbps at 1920x1080, scaled by
+ * pixels^0.95, times the "high" factor 0.3 * e^(2.5538 * 0.75)) plus the
+ * copied audio, over the clip's duration.
+ */
+function estimateBytes(job) {
+  const video = 3e6 * Math.pow(job.W * job.H / (1920 * 1080), 0.95) * 0.3 * Math.exp(2.5538 * 0.75);
+  return (video + (job.audioBitrate || 0)) * job.duration / 8;
+}
+
+function memoryWarning(job) {
+  const bytes = estimateBytes(job);
+  return bytes > WARN_BYTES
+    ? `This browser cannot write the result to disk storage, so the whole output (about ` +
+      `${(bytes / 1e9).toFixed(1)} GB) will be held in memory; the tab may run out of memory and crash. ` +
+      "A shorter or smaller clip, or a current Chrome or Edge, avoids this."
+    : null;
 }
 
 // ------------------------------------------------------------------ startup
@@ -92,6 +190,11 @@ async function loadMediabunny() {
 // Start both downloads early; failures are reported when they matter.
 loadMediabunny().catch(() => {});
 loadOpenCV().catch(() => {});
+removeStaleOutputs();
+
+addEventListener("beforeunload", e => {
+  if (busy) e.preventDefault();          // ask before throwing away a running job
+});
 
 function webCodecsProblem() {
   if (typeof VideoDecoder === "undefined" || typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined")
@@ -107,7 +210,7 @@ async function chooseFile(file) {
   if (busy || !file) return;
   const token = ++probeToken;
   clearError();
-  clearResult();
+  await clearResult();
   ui.progressBox.hidden = true;
   ui.process.disabled = true;
   current = null;
@@ -116,13 +219,18 @@ async function chooseFile(file) {
   setState("probing");
 
   const problem = webCodecsProblem();
-  if (problem) return showError(problem);
+  if (problem) {
+    ui.info.textContent = file.name;
+    return showError(problem);
+  }
 
   let m;
   try {
     m = await loadMediabunny();
   } catch (e) {
-    return showError(`Could not load the Mediabunny library from ${MEDIABUNNY_URL}: ${e.message}`);
+    ui.info.textContent = file.name;
+    return showError(`Could not load the Mediabunny library from ${MEDIABUNNY_URL} (${e.message}). ` +
+      "Check your connection and reload the page.");
   }
 
   let input;
@@ -137,9 +245,10 @@ async function chooseFile(file) {
     const stats = await video.computePacketStats();
     const audioTrack = await input.getPrimaryAudioTrack();
     const audio = audioTrack ? (await audioTrack.getCodec()) ?? "unknown codec" : null;
+    const audioBitrate = audioTrack ? await audioTrack.getBitrate() : 0;
     if (token !== probeToken) return;
 
-    const info = { file, W, H, frames: stats.packetCount, fps: stats.averagePacketRate, duration, audio };
+    const info = { file, W, H, frames: stats.packetCount, fps: stats.averagePacketRate, duration, audio, audioBitrate };
     ui.info.textContent = `${file.name} — ${W}×${H} — ${fmtTime(duration)} — ${info.frames} frames at ` +
       `${Number(info.fps.toFixed(2))} fps — ${audio ? "audio: " + audio : "no audio"}`;
 
@@ -151,8 +260,14 @@ async function chooseFile(file) {
       return showError(`This browser has no H.264 encoder for ${W}×${H} video (WebCodecs reports "avc" as ` +
         "unsupported), so the result cannot be written as MP4. Try a current Chrome, Edge or Safari.");
 
+    if (!info.frames) return showError(`${file.name} has a video track with no frames.`);
+
     current = info;
     ui.process.disabled = false;
+    if (!opfsSupported()) {
+      const warning = memoryWarning(info);
+      if (warning) showWarning(warning);
+    }
     setState("ready");
   } catch (e) {
     if (token !== probeToken) return;
@@ -182,13 +297,14 @@ async function run() {
   ui.process.disabled = true;
   ui.file.disabled = true;
   clearError();
-  clearResult();
+  announce("");
+  await clearResult();
   ui.progressBox.hidden = false;
   ui.progress.value = 0;
   ui.status.textContent = "Loading OpenCV…";
   setState("processing");
 
-  let input = null, tracker = null, done = 0, stage = "load", tStart = 0;
+  let input = null, tracker = null, opfs = null, output = null, done = 0, stage = "load", tStart = 0;
   try {
     try {
       await loadOpenCV();
@@ -198,9 +314,14 @@ async function run() {
     stage = "convert";
 
     input = new mb.Input({ source: new mb.BlobSource(job.file), formats: mb.ALL_FORMATS });
-    const output = new mb.Output({
-      format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }),
-      target: new mb.BufferTarget(),
+    opfs = await openOpfsOutput();
+    if (!opfs) {
+      const warning = memoryWarning(job);
+      if (warning) showWarning(warning);
+    }
+    output = new mb.Output({
+      format: new mb.Mp4OutputFormat({ fastStart: false }),   // moov at the end: nothing held back in RAM
+      target: opfs ? new mb.StreamTarget(opfs.writable, { chunked: true }) : new mb.BufferTarget(),
     });
 
     let W = 0, H = 0, srcCtx = null, outCanvas = null, outCtx = null, lastTs = -Infinity;
@@ -219,8 +340,9 @@ async function run() {
         throw new Error(`frame ${done + 1} is ${sample.displayWidth}×${sample.displayHeight}, ` +
           `the video started at ${W}×${H}; videos that change size mid-stream are not supported`);
       if (!(sample.timestamp > lastTs))
-        throw new Error(`frames arrived out of order (${sample.timestamp} s after ${lastTs} s); ` +
-          "the tracker needs them in presentation order");
+        throw new Error(`the source file has a repeated or out-of-order frame timestamp ` +
+          `(${sample.timestamp} s after ${lastTs} s), and the tracker needs frames in presentation order. ` +
+          "Re-muxing it often fixes this, e.g. ffmpeg -i in.mp4 -c copy out.mp4");
       lastTs = sample.timestamp;
 
       sample.draw(srcCtx, 0, 0, W, H);
@@ -251,9 +373,13 @@ async function run() {
 
     ui.status.textContent = `0 / ${job.frames} frames`;
     await conversion.execute();
+    if (done === 0) throw new Error("no video frames were decoded from this file");
 
-    const blob = new Blob([output.target.buffer], { type: "video/mp4" });
-    resultUrl = URL.createObjectURL(blob);
+    // execute() finalized the output, which closed (committed) the OPFS stream.
+    const result = opfs ? await opfs.handle.getFile() : new Blob([output.target.buffer], { type: "video/mp4" });
+    output = null;                                   // drop the in-memory buffer (fallback) now
+    if (opfs) outName = opfs.name;
+    resultUrl = URL.createObjectURL(result);
     ui.output.src = resultUrl;
     ui.download.href = resultUrl;
     ui.download.download = `${job.file.name.replace(/\.[^.]+$/, "") || "video"}-blobtrack.mp4`;
@@ -264,11 +390,20 @@ async function run() {
       (lostAudio.length ? ` — the audio could not be kept (${lostAudio.map(d => d.reason).join(", ")})` : "");
     document.body.dataset.frames = String(done);
     setState("done");
+    announce(`Done: ${done} frames processed. The result is ready to play or download.`);
+    ui.download.focus();
   } catch (e) {
     console.error(e);
     showError(e.reported ? e.message
       : stage === "load" ? `Could not start: ${e.message}`
       : `Processing failed after ${done} of ${job.frames} frames: ${e.message}`);
+    if (opfs) {
+      // A failed Conversion.execute cancels the output, which closes the stream; if we never got that far,
+      // the stream is still open and must be aborted before the file can be removed.
+      if (output && output.state !== "canceled" && output.state !== "finalized") await output.cancel().catch(() => {});
+      await opfs.writable.abort().catch(() => {});
+      await removeOpfsFile(opfs.name);
+    }
   } finally {
     tracker?.dispose();
     input?.dispose();

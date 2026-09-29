@@ -4,6 +4,9 @@
 //     npm run test:app               (or: node tests/app-smoke.mjs)
 //     npm run test:app -- --headed   (visible Chrome window, if headless lacks an encoder)
 //
+// Needs network access to cdn.jsdelivr.net: the app loads OpenCV.js and
+// Mediabunny from there. Also needs ffmpeg/ffprobe on PATH.
+//
 // Serves the repo root on a free port, opens app/ in headless system Chrome
 // (playwright-core, channel "chrome"), and for each fixture, in one page (so it
 // also covers processing a second file without a reload): chooses the file,
@@ -20,7 +23,12 @@
 // tests/out/app-frame-pan.png. It also checks two failure paths show an
 // inline error: a non-video file (before the clips, so the page must stay
 // usable afterwards), and OpenCV.js failing to load (a fresh page with the CDN
-// request blocked). Exits non-zero on any failure.
+// request blocked). The app writes its output to an OPFS file; the test checks
+// exactly one such file exists after each run (the previous one is removed).
+// Finally it runs pan again on a page with ?target=memory, the in-memory
+// (BufferTarget) fallback for browsers without OPFS writable streams, and
+// applies the same checks (tests/out/app-pan-memory.mp4). Exits non-zero on
+// any failure.
 
 import { mkdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -28,10 +36,11 @@ import { join } from "node:path";
 import { ROOT, serve, withTimeout, launchChrome, forwardConsole } from "./harness.mjs";
 
 const OUT = join(ROOT, "tests", "out");
-const CLIPS = [
+const CLIPS = [                  // run in order on one page (OPFS output)
   { clip: "shapes", png: "app-frame.png" },
   { clip: "pan", png: "app-frame-pan.png" },
 ];
+const MEMORY_CLIP = { clip: "pan", png: "app-frame-pan-memory.png", tag: "pan-memory" };
 const MIN_DIFF = 2.0;           // mean |out - src| over RGB, 0..255: the effect changed the frame
 const MIN_STD = 10;             // output frame is not a flat image
 const LOAD_TIMEOUT = 60_000, CLIP_TIMEOUT = 300_000;
@@ -101,6 +110,62 @@ function check(src, outFile, pngOut) {
   return { o, diff, std, fails };
 }
 
+// Choose a fixture, process it, download the result and check it.
+async function processClip(page, { clip, png, tag = clip }, mode) {
+  const srcFile = join(ROOT, "tests", "fixtures", `${clip}.mp4`);
+  const src = { file: srcFile, ...probe(srcFile) };
+  const outFile = join(OUT, `app-${tag}.mp4`);
+
+  await page.setInputFiles("#file", srcFile);
+  await page.waitForFunction(() => ["ready", "error"].includes(document.body.dataset.state),
+    null, { timeout: LOAD_TIMEOUT, polling: 100 });
+  let err = await page.evaluate(() => document.body.dataset.state === "error" && document.getElementById("error").textContent);
+  if (err) throw new Error(`${tag}: the app rejected the file: ${err}`);
+  console.log(`${stamp()} ${tag}: ${await page.textContent("#info")}`);
+
+  const tClick = Date.now();
+  await page.click("#process");
+  await withTimeout(page.waitForFunction(() => ["done", "error"].includes(document.body.dataset.state),
+    null, { timeout: 0, polling: 250 }), CLIP_TIMEOUT, `processing ${tag}`);
+  const wall = (Date.now() - tClick) / 1000;
+  err = await page.evaluate(() => document.body.dataset.state === "error" && document.getElementById("error").textContent);
+  if (err) throw new Error(`${tag}: processing failed: ${err}`);
+  console.log(`${stamp()} ${tag}: ${await page.textContent("#status")}`);
+
+  const ui = await page.evaluate(async () => {
+    const dir = await navigator.storage.getDirectory();
+    const opfs = [];
+    for await (const name of dir.keys()) if (name.startsWith("blobtrack-")) opfs.push(name);
+    return { focus: document.activeElement?.id, announce: document.getElementById("announce").textContent,
+      href: document.getElementById("download").href, opfs };
+  });
+
+  const [download] = await Promise.all([page.waitForEvent("download", { timeout: 30_000 }), page.click("#download")]);
+  await download.saveAs(outFile);
+  const name = download.suggestedFilename();
+
+  // The preview element must be able to play the result.
+  const playable = await page.evaluate(() => new Promise(resolve => {
+    const v = document.getElementById("output");
+    if (v.readyState >= 2) return resolve(true);
+    v.addEventListener("loadeddata", () => resolve(true), { once: true });
+    v.addEventListener("error", () => resolve(false), { once: true });
+    setTimeout(() => resolve(false), 10_000);
+  }));
+
+  const r = check(src, outFile, join(OUT, png));
+  if (name !== `${clip}-blobtrack.mp4`) r.fails.push(`download is named ${name}, expected ${clip}-blobtrack.mp4`);
+  if (!playable) r.fails.push("the <video> preview did not load the result");
+  const appFrames = Number(await page.evaluate(() => document.body.dataset.frames));
+  if (appFrames !== src.frames) r.fails.push(`the app processed ${appFrames} frames, source has ${src.frames}`);
+  if (ui.focus !== "download") r.fails.push(`focus is on #${ui.focus}, expected the Download button`);
+  if (!/^Done/.test(ui.announce)) r.fails.push(`the status region announces "${ui.announce}", expected "Done…"`);
+  const wantOpfs = mode === "opfs" ? 1 : 0;
+  if (ui.opfs.length !== wantOpfs) r.fails.push(`${ui.opfs.length} OPFS output files (${ui.opfs.join(", ")}), expected ${wantOpfs}`);
+  rows.push({ clip: tag, src, wall, name, png, mode, opfs: ui.opfs, ...r });
+  if (r.fails.length) failed = true;
+}
+
 // --------------------------------------------------------------------- main
 await mkdir(OUT, { recursive: true });
 const server = await serve();
@@ -133,48 +198,12 @@ try {
     console.log("  - FAIL: a non-video file should show an inline error and keep Process disabled");
   }
 
-  for (const { clip, png } of CLIPS) {
-    const srcFile = join(ROOT, "tests", "fixtures", `${clip}.mp4`);
-    const src = { file: srcFile, ...probe(srcFile) };
-    const outFile = join(OUT, `app-${clip}.mp4`);
+  for (const c of CLIPS) await processClip(page, c, "opfs");
 
-    await page.setInputFiles("#file", srcFile);
-    await page.waitForFunction(() => ["ready", "error"].includes(document.body.dataset.state),
-      null, { timeout: LOAD_TIMEOUT, polling: 100 });
-    let err = await page.evaluate(() => document.body.dataset.state === "error" && document.getElementById("error").textContent);
-    if (err) throw new Error(`${clip}: the app rejected the file: ${err}`);
-    console.log(`${stamp()} ${clip}: ${await page.textContent("#info")}`);
-
-    const tClick = Date.now();
-    await page.click("#process");
-    await withTimeout(page.waitForFunction(() => ["done", "error"].includes(document.body.dataset.state),
-      null, { timeout: 0, polling: 250 }), CLIP_TIMEOUT, `processing ${clip}`);
-    const wall = (Date.now() - tClick) / 1000;
-    err = await page.evaluate(() => document.body.dataset.state === "error" && document.getElementById("error").textContent);
-    if (err) throw new Error(`${clip}: processing failed: ${err}`);
-    console.log(`${stamp()} ${clip}: ${await page.textContent("#status")}`);
-
-    const [download] = await Promise.all([page.waitForEvent("download", { timeout: 30_000 }), page.click("#download")]);
-    await download.saveAs(outFile);
-    const name = download.suggestedFilename();
-
-    // The preview element must be able to play the result.
-    const playable = await page.evaluate(() => new Promise(resolve => {
-      const v = document.getElementById("output");
-      if (v.readyState >= 2) return resolve(true);
-      v.addEventListener("loadeddata", () => resolve(true), { once: true });
-      v.addEventListener("error", () => resolve(false), { once: true });
-      setTimeout(() => resolve(false), 10_000);
-    }));
-
-    const r = check(src, outFile, join(OUT, png));
-    if (name !== `${clip}-blobtrack.mp4`) r.fails.push(`download is named ${name}, expected ${clip}-blobtrack.mp4`);
-    if (!playable) r.fails.push("the <video> preview did not load the result");
-    const appFrames = Number(await page.evaluate(() => document.body.dataset.frames));
-    if (appFrames !== src.frames) r.fails.push(`the app processed ${appFrames} frames, source has ${src.frames}`);
-    rows.push({ clip, src, wall, name, png, ...r });
-    if (r.fails.length) failed = true;
-  }
+  const pageMem = await browser.newPage({ acceptDownloads: true });
+  forwardConsole(pageMem, stamp);
+  await pageMem.goto(url + "?target=memory", { timeout: 30_000 });
+  await processClip(pageMem, MEMORY_CLIP, "memory");
 
   // OpenCV.js unavailable: the app must say so inline instead of hanging.
   const page2 = await browser.newPage();
@@ -203,8 +232,8 @@ try {
 }
 
 console.log("\n==== app smoke: app/ in Chrome -> MP4 ====");
-for (const { clip, src, o, wall, name, png, diff, std, fails } of rows) {
-  console.log(`\n${clip}: ${fails.length ? "FAIL" : "PASS"}   (${name})`);
+for (const { clip, src, o, wall, name, png, mode, diff, std, fails } of rows) {
+  console.log(`\n${clip}: ${fails.length ? "FAIL" : "PASS"}   (${name}, output via ${mode === "opfs" ? "OPFS file" : "in-memory buffer"})`);
   console.log(`  video     ${o.vcodec} ${o.width}x${o.height}   source ${src.vcodec} ${src.width}x${src.height}`);
   console.log(`  fps       ${o.fps.toFixed(3)} (r ${o.rFps.toFixed(3)})   source ${src.fps.toFixed(3)}`);
   console.log(`  frames    ${o.frames}   source ${src.frames}`);

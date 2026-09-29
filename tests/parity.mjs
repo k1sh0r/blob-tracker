@@ -6,6 +6,9 @@
 //     npm run test:parity            (or: node tests/parity.mjs)
 //     OPENCV_URL=http://.../opencv.js npm run test:parity    (self-hosted build)
 //
+// Needs network access to cdn.jsdelivr.net for OpenCV.js, unless OPENCV_URL
+// points at a local build.
+//
 // Serves the repo root on a free port, opens tests/parity.html in headless
 // system Chrome (playwright-core, channel "chrome"), runs a fresh BlobTracker
 // over each clip's lossless PNG frames with the reference params, and checks
