@@ -22,52 +22,18 @@
 // tests/out/<clip>-py-vs-js.png (Python render | JS render of that frame,
 // made with the repo venv). Exits non-zero on any failure.
 
-import { createServer } from "node:http";
-import { readFile, mkdir, writeFile, stat } from "node:fs/promises";
+import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { extname, join, normalize, resolve, sep, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { chromium } from "playwright-core";
+import { join } from "node:path";
+import { ROOT, serve, withTimeout, launchChrome, forwardConsole } from "./harness.mjs";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "tests", "out");
 const CLIPS = ["shapes", "pan"];
 const SHOW_FRAME = 40;               // the frame rendered for eyeballing
 const LEAK_FROM = 10;                // live-Mat count must not grow after this frame
 const MIN_MATCH = 0.95, MIN_IOU = 0.9, MAX_PT_DEV = 0.5;
 const LOAD_TIMEOUT = 180_000, CLIP_TIMEOUT = 120_000;
-
-// ------------------------------------------------------------ static server
-const TYPES = {
-  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8", ".json": "application/json",
-  ".png": "image/png", ".ttf": "font/ttf", ".css": "text/css", ".mp4": "video/mp4",
-};
-
-function serve() {
-  const server = createServer(async (req, res) => {
-    try {
-      const path = normalize(decodeURIComponent(new URL(req.url, "http://x").pathname));
-      const file = join(ROOT, path);
-      if (file !== ROOT && !file.startsWith(ROOT + sep)) throw Object.assign(new Error("outside root"), { code: "ENOENT" });
-      if (!(await stat(file)).isFile()) throw Object.assign(new Error("not a file"), { code: "ENOENT" });
-      res.writeHead(200, { "content-type": TYPES[extname(file)] || "application/octet-stream", "cache-control": "no-store" });
-      res.end(await readFile(file));
-    } catch {
-      res.writeHead(404).end("not found");
-    }
-  });
-  return new Promise(r => server.listen(0, "127.0.0.1", () => r(server)));
-}
-
-function withTimeout(promise, ms, what) {
-  let timer;
-  return Promise.race([
-    promise.finally(() => clearTimeout(timer)),
-    new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${what} timed out after ${ms / 1000}s`)), ms); }),
-  ]);
-}
 
 // ------------------------------------------------------------------ compare
 function iou(a, b) {                 // same formula as blobtrack.py
@@ -169,21 +135,15 @@ const t0 = Date.now();
 const stamp = () => `+${((Date.now() - t0) / 1000).toFixed(1)}s`;
 console.log(`serving ${ROOT} on :${port}`);
 
-let browser;
-try {
-  browser = await chromium.launch({ channel: "chrome", headless: true });
-} catch (e) {
-  console.error("Could not start Google Chrome. This test drives the system Chrome (playwright channel " +
-    "\"chrome\"); install Google Chrome from https://www.google.com/chrome/ and re-run.\n\n" + e.message);
+const browser = await launchChrome();
+if (!browser) {
   server.close();
   process.exit(1);
 }
 let failed = false;
 try {
   const page = await browser.newPage();
-  page.on("console", m => console.log(`${stamp()} ${m.type() === "log" ? "" : m.type() + ": "}${m.text()}`));
-  page.on("pageerror", e => console.log(`${stamp()} PAGEERROR ${e.message}`));
-  page.on("crash", () => console.log(`${stamp()} PAGE CRASHED`));
+  forwardConsole(page, stamp);
   await page.goto(url, { timeout: 30_000 });
   await page.waitForFunction(() => window.PARITY && (window.PARITY.ready || window.PARITY.error),
     null, { timeout: LOAD_TIMEOUT, polling: 500 });
