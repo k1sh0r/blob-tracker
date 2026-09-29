@@ -1,6 +1,6 @@
 ---
 name: blob-tracking
-description: Apply the "blob tracking" video effect (the TouchDesigner Blob Track look from viral edits) - white boxes that lock onto and follow things in the footage, lines connecting them, numbered ID/coordinate chips, a few inverted or shifted "window" boxes, optical-flow corner markers, all screen-blended into the picture. Ships a Python CLI/module and a browser (OpenCV.js) module with identical output, plus a method spec for porting to any tool. Use this whenever someone wants tracking boxes on a video, a blob-track / computer-vision / surveillance / HUD / "tracker" overlay, boxes and lines that follow objects with numbers, a TouchDesigner blob track look without TouchDesigner, or to add that effect to a clip, a web app, a Python pipeline, or a project in TouchDesigner, After Effects, DaVinci Resolve, Remotion, HyperFrames, Unity, Unreal or p5.js - even if they never say "blob".
+description: Apply the "blob tracking" video effect (the TouchDesigner Blob Track look from viral edits) - white boxes that lock onto and follow things in the footage, connecting lines, numbered ID/coordinate chips, a few inverted "window" boxes and optical-flow corner markers, screen-blended into the picture. Bundles a Python CLI/module and a browser (OpenCV.js) module with identical output, plus a porting spec. Use it whenever someone wants tracking boxes on a video, a blob-track / computer-vision / surveillance / HUD / "tracker" overlay look, boxes and lines that follow objects with numbers, or that effect in a clip, a web app, a Python pipeline or a creative tool (TouchDesigner, After Effects, Resolve, Remotion, HyperFrames, game engines, p5.js), even if they never say "blob". Not for real object detection, recognition or analytics (YOLO, SORT, people counting, security-camera analytics), issue or bug tracking, or blob/object storage.
 ---
 
 # Blob tracking
@@ -10,17 +10,34 @@ regions), keep a stable ID from frame to frame, and are joined by lines. A
 few boxes invert or shift their contents, white chips show IDs, coordinates
 and areas, and corner markers ride optical flow. Everything is drawn in white
 and screen-blended into the picture. The look was tuned at 1080x1920 and
-scales to any size and orientation.
+scales to any size and orientation. It is a visual effect: the boxes follow
+image regions, not recognised objects.
 
 Two implementations produce the same detections (a parity test checks this):
+`scripts/blobtrack.py` (Python module and CLI) and `scripts/blobtrack.js`
+(browser ES module on OpenCV.js). Each needs `scripts/JetBrainsMono-Regular.ttf`
+beside it for the label font.
 
-- `scripts/blobtrack.py`: Python module and CLI (numpy, OpenCV, Pillow, ffmpeg)
-- `scripts/blobtrack.js`: browser ES module (OpenCV.js), no build step
+**Skill directory.** Commands below write it as `${CLAUDE_SKILL_DIR}`, which
+Claude Code replaces with the absolute path. Other agents: it is the folder
+containing this SKILL.md (Claude Code also shows it as "Base directory for
+this skill"); write that absolute path into every command yourself. Do not
+rely on `export` or an activated venv: each shell command may run in a fresh
+shell.
 
-Both need `scripts/JetBrainsMono-Regular.ttf` beside them for the label font.
-Paths below are relative to this skill's directory (the folder holding this
-file). Commands and code below call it `$SKILL_DIR`, so export it first, e.g.
-`export SKILL_DIR=/absolute/path/to/blob-tracking`.
+## Requirements
+
+- Paths A and B: Python 3.9+, and `ffmpeg` + `ffprobe` on PATH. 4.1 or newer
+  is recommended; 4.x works, but builds older than 4.1 skip the frame-level
+  colour tags (the H.264 stream is still tagged BT.709).
+- Path C: pages served over HTTP (not `file://`), network access to
+  cdn.jsdelivr.net for OpenCV.js (about 10 MB, about 3 MB compressed), a
+  browser with WebCodecs for whole-file encoding. Only Chrome has been
+  measured.
+- Never install Python packages with `--break-system-packages`. Ask the user
+  before installing system packages such as ffmpeg (macOS
+  `brew install ffmpeg`, Debian/Ubuntu `sudo apt install ffmpeg`, Windows
+  `winget install ffmpeg`).
 
 ## Pick the path that fits the project
 
@@ -37,73 +54,100 @@ result fastest.
 
 ### A. CLI (video file in, video file out)
 
-Needs Python 3.9+ and `ffmpeg` + `ffprobe` on PATH (4.x or newer; macOS
-`brew install ffmpeg`, Debian/Ubuntu `sudo apt install ffmpeg`, Windows
-`winget install ffmpeg`). Install the three Python packages once, ideally in
-a virtual environment:
+Keep the tool's packages in their own venv outside the user's project, and
+call that venv's interpreter directly (on Windows the interpreter is
+`%USERPROFILE%\.cache\blob-tracking\venv\Scripts\python.exe`). Once:
 
 ```sh
-python3 -m venv .venv && . .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r "$SKILL_DIR/scripts/requirements.txt"
-python "$SKILL_DIR/scripts/blobtrack.py" input.mp4 -o output.mp4
+python3 -m venv ~/.cache/blob-tracking/venv
+~/.cache/blob-tracking/venv/bin/python -m pip install -r "${CLAUDE_SKILL_DIR}/scripts/requirements.txt"
 ```
 
-Useful flags: `--start SEC --duration SEC` (process a section), `--crf N`
-(x264 quality, default 16, lower is better), `--no-audio`, and every
-parameter below as `--name value`. `python "$SKILL_DIR/scripts/blobtrack.py" --help`
-lists them. It prints `output.mp4: N frames` and exits 1 with a one-line
-`blobtrack: ...` message on any error.
-The first run after installing is slower (Python compiles and loads the
-packages once); later runs go at the speeds under Performance.
-
-For a quick look before a full render, process two seconds and grab a still.
-Pick a `--start` inside the clip (it fails with "no frames decoded" when the
-start is past the end; use `--start 0` for short clips):
+Then, for a file `clip.mp4`:
 
 ```sh
-python "$SKILL_DIR/scripts/blobtrack.py" input.mp4 -o preview.mp4 --start 3 --duration 2
-ffmpeg -v error -y -ss 1 -i preview.mp4 -frames:v 1 preview.png
+~/.cache/blob-tracking/venv/bin/python "${CLAUDE_SKILL_DIR}/scripts/blobtrack.py" clip.mp4 -o clip-blobtrack.mp4
+```
+
+- Name the output `<input-stem>-blobtrack.mp4`. The CLI refuses an existing
+  output file unless you pass `--overwrite`; only pass it when the user
+  wants that file replaced. It writes to a temporary file and renames it
+  into place on success, so a failed run leaves no partial file.
+- Other flags: `--start SEC --duration SEC` (a section), `--crf N` (x264
+  quality, default 16, lower is better), `--no-audio`, and every parameter
+  below as `--name value`; `--help` lists them.
+- It prints `clip-blobtrack.mp4: N frames`, or exits 1 with one line
+  `blobtrack: ...` on any error.
+- The first run after installing is slower (Python loads the packages for
+  the first time).
+
+For a quick look before a full render, process two seconds into the temp
+directory and grab a still. Pick a `--start` inside the clip (a start past
+the end fails with "no frames decoded"; use `--start 0` for short clips):
+
+```sh
+~/.cache/blob-tracking/venv/bin/python "${CLAUDE_SKILL_DIR}/scripts/blobtrack.py" clip.mp4 -o "${TMPDIR:-/tmp}/clip-blobtrack-preview.mp4" --start 0 --duration 2 --overwrite
+ffmpeg -v error -y -ss 1 -i "${TMPDIR:-/tmp}/clip-blobtrack-preview.mp4" -frames:v 1 "${TMPDIR:-/tmp}/clip-blobtrack-preview.png"
 ```
 
 ### B. Python module (your own frame loop)
 
-`blobtrack.py` imports as a module. Either put `scripts/` on `sys.path` or
-copy **both** `blobtrack.py` and `JetBrainsMono-Regular.ttf` into the
-project (the font is looked up beside the module). Frames are
-`H x W x 3` **RGB** `uint8` arrays fed in order, one tracker per clip:
+In project code, copy the module, its font and the font licence into the
+project (installed skill paths are versioned and change on update):
+
+```sh
+cp "${CLAUDE_SKILL_DIR}/scripts/blobtrack.py" "${CLAUDE_SKILL_DIR}/scripts/JetBrainsMono-Regular.ttf" "${CLAUDE_SKILL_DIR}/scripts/JetBrainsMono-OFL.txt" path/in/project/
+```
+
+Add its dependencies to the project's own environment: `numpy>=1.24`,
+`opencv-python-headless>=4.8,<5`, `pillow>=10.1` (from
+`scripts/requirements.txt`). If the project already has `opencv-python` or
+`opencv-contrib-python`, do not add `opencv-python-headless`: both provide
+`cv2` and conflict. For a throwaway script only, you can skip the copy and
+put `sys.path.insert(0, "${CLAUDE_SKILL_DIR}/scripts")` at the top.
+
+Frames are `H x W x 3` **RGB** `uint8` arrays, fed in order, one tracker per
+clip:
 
 ```python
-import os, sys; sys.path.insert(0, os.path.join(os.environ["SKILL_DIR"], "scripts"))
+import os, tempfile
+from contextlib import closing
 from blobtrack import BlobTracker, probe, read_frames
 from PIL import Image
 
-info = probe("input.mp4")                                    # width, height, fps, ...
-bt = BlobTracker(info["width"], info["height"])              # optional params: bright=90, ...
-for i, rgb in enumerate(read_frames("input.mp4", info)):     # decoded RGB frames via ffmpeg
-    out = bt.process(rgb)                                    # treated frame, same shape
-    Image.fromarray(out).save(f"frame_{i:04d}.png")
-    if i == 4: break
-print(bt.last_tracks)    # [{id, x, y, w, h, kind, a, age}, ...] in output px; bt.last_points: [(x, y), ...]
+info = probe("clip.mp4")                                  # width, height, fps, audio, ...
+bt = BlobTracker(info["width"], info["height"])           # optional params: small=25, ...
+out_dir = tempfile.mkdtemp(prefix="blobtrack-")
+with closing(read_frames("clip.mp4", info)) as frames:    # decoded RGB frames via ffmpeg
+    for i, rgb in enumerate(frames):
+        out = bt.process(rgb)                             # treated frame, same shape
+        Image.fromarray(out).save(os.path.join(out_dir, f"frame_{i:04d}.png"))
+        if i == 4:
+            break
+print(out_dir, bt.last_tracks)  # tracks: [{id, x, y, w, h, kind, a, age}] in output px; bt.last_points: [(x, y)]
 ```
 
-- Frames from OpenCV (`cv2.VideoCapture`) are BGR: pass
-  `cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)` and convert the result back before
-  `cv2.VideoWriter`.
-- To process a whole file (with audio) from Python, call
-  `blobtrack.run("in.mp4", "out.mp4", params={"small": 25})`; it is what the
-  CLI runs.
+- Frames from `cv2.VideoCapture` are BGR: pass
+  `cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)`, and convert the result back
+  before `cv2.VideoWriter`.
+- Whole file with audio from Python:
+  `blobtrack.run("clip.mp4", "clip-blobtrack.mp4", params={"small": 25})`
+  (what the CLI runs; `overwrite=False` by default).
 - `last_tracks` / `last_points` after each `process()` are the per-frame
-  data if you want to draw the overlay in another tool (path D).
+  data for drawing the overlay in another tool (path D).
 - Bad parameters raise `BlobTrackError` (a `ValueError`); unknown parameter
   names raise `TypeError`.
 
 ### C. Browser / JS project
 
-Copy `scripts/blobtrack.js` **and** `scripts/JetBrainsMono-Regular.ttf`
-into the same folder of the web project (without the font the chips fall
-back to `monospace`). It is a plain ES module: serve it over HTTP (not
-`file://`) and use it on the main thread (not in a worker). It loads
-OpenCV.js from jsDelivr on first use.
+Copy `scripts/blobtrack.js` **and** `scripts/JetBrainsMono-Regular.ttf` into
+the same folder of the web project; the module finds the font beside itself
+(without it the chips fall back to `monospace`). It is a plain ES module with
+no build step; use it on the main thread (not in a worker). In a bundled
+project (Vite, webpack, Next.js...), ship both files as static assets (e.g.
+`public/`) so `import.meta.url` still points next to the font, or pass
+`loadOpenCV({ fontUrl })`; for Mediabunny, `npm i mediabunny@1.60.0` and
+`import * as mb from "mediabunny"`.
 
 ```js
 import { loadOpenCV, BlobTracker } from "./blobtrack.js";
@@ -120,72 +164,86 @@ bt.process(src.getImageData(0, 0, W, H), out);   // draws the treated frame into
 bt.dispose();                               // when the clip is done (frees OpenCV memory)
 ```
 
-Getting frames:
+**Whole file -> MP4** (the robust route): decode and re-encode with
+Mediabunny's `Conversion` and call the tracker from its `video.process`
+hook, which runs once per frame, in order. Condensed from the repo's tested
+app (`app/app.js` at github.com/k1sh0r/blob-tracker, which adds progress UI
+and OPFS output):
 
-- **Whole file -> MP4 download** (the robust route): decode and re-encode
-  with Mediabunny's `Conversion` and call the tracker from its
-  `video.process` hook, which runs once per frame, in order. The pattern
-  (from the repo's working app):
+```js
+import * as mb from "https://cdn.jsdelivr.net/npm/mediabunny@1.60.0/dist/bundles/mediabunny.min.mjs";
+import { loadOpenCV, BlobTracker } from "./blobtrack.js";
 
-  ```js
-  import * as mb from "https://cdn.jsdelivr.net/npm/mediabunny@1.60.0/dist/bundles/mediabunny.min.mjs";
+async function blobtrackFile(file) {                 // File or Blob in, MP4 Blob out
+  await loadOpenCV();
   const input = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
   const output = new mb.Output({ format: new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
-  let bt, src, outCanvas, outCtx;
+  let bt = null, W = 0, H = 0, src, outCanvas, outCtx, lastTs = -Infinity;
   const process = sample => {
-    const W = sample.displayWidth, H = sample.displayHeight;
-    if (!bt) {
+    if (!bt) {                                       // sized from the first (upright) frame
+      W = sample.displayWidth; H = sample.displayHeight;
       bt = new BlobTracker(W, H);
       src = new OffscreenCanvas(W, H).getContext("2d", { willReadFrequently: true });
       outCanvas = new OffscreenCanvas(W, H); outCtx = outCanvas.getContext("2d");
     }
+    if (sample.displayWidth !== W || sample.displayHeight !== H)
+      throw new Error("the video changes size mid-stream");
+    if (!(sample.timestamp > lastTs))                // the tracker needs frames in presentation order
+      throw new Error("repeated or out-of-order frame timestamp; remux it: ffmpeg -i in.mp4 -c copy out.mp4");
+    lastTs = sample.timestamp;
     sample.draw(src, 0, 0, W, H);
     bt.process(src.getImageData(0, 0, W, H), outCtx);
     return new mb.VideoSample(outCanvas, { timestamp: sample.timestamp, duration: sample.duration });
   };
-  const conversion = await mb.Conversion.init({ input, output, tracks: "primary",
-    video: { codec: "avc", forceTranscode: true, process } });
-  await conversion.execute();                // audio is passed through
-  bt?.dispose();
-  const mp4 = new Blob([output.target.buffer], { type: "video/mp4" });
-  ```
+  try {
+    const conversion = await mb.Conversion.init({ input, output, tracks: "primary",
+      video: { codec: "avc", forceTranscode: true, process } });
+    if (!conversion.isValid)
+      throw new Error("cannot convert: " + conversion.discardedTracks.map(d => `${d.track.type}: ${d.reason}`).join("; "));
+    // conversion.discardedTracks lists any audio that could not be kept
+    await conversion.execute();                      // audio is passed through
+    return new Blob([output.target.buffer], { type: "video/mp4" });
+  } finally {
+    bt?.dispose();
+    input.dispose();
+  }
+}
+```
 
-  `BufferTarget` keeps the whole output in RAM; for long clips stream it to
-  OPFS as described in `references/traps.md`. `app/app.js` in the source
-  repository (github.com/k1sh0r/blob-tracker) is the complete, tested
-  version: progress, errors, OPFS output, timestamp checks.
-- **Live `<video>` / webcam** (not measured): drawing the element each
-  `requestVideoFrameCallback` should work, but at about 77 ms/frame expect
-  roughly 13 frames/s at 1080x1920, so expect playback frames to be skipped
-  and motion and optical flow to see bigger jumps than in an offline render.
-  For a faithful result, render offline as above.
+`BufferTarget` holds the whole output in RAM; for long clips stream it to
+OPFS (see `references/traps.md`).
+
+**Live `<video>` / webcam** (not measured): drawing the element each
+`requestVideoFrameCallback` should work, but at about 77 ms/frame expect
+roughly 13 frames/s at 1080x1920, so expect skipped playback frames and
+bigger jumps for motion and optical flow than in an offline render. For a
+faithful result, render offline as above.
 
 Errors: a bad argument to `process()` throws and leaves the tracker usable;
 any later failure makes it unusable (create a new one). See `traps.md`.
 
 ### D. Other tools
 
-Only the Python and browser implementations are tested in this repository.
-The tool-specific advice below (TouchDesigner, After Effects, Resolve/Fusion,
-Remotion, HyperFrames, Unity/Unreal, p5.js/Processing) is guidance that has
-not been tested here. Choose by what the tool can do:
+Only the Python and browser implementations are tested in this repository;
+the advice for other tools is untested guidance. Choose by what the tool can
+do:
 
-1. **Bake, then composite** (works everywhere, pixel-exact): run path A on
+1. **Bake, then composite** (pixel-exact, works everywhere): run path A on
    the exact frames the edit will use and import the result as footage.
    Apply any crop, scale, reframe or speed change **before** running the
-   effect: the boxes are measured against the exact pixels, and a transform
-   applied afterwards slides every box off its object. For HTML/React video
-   frameworks (Remotion, HyperFrames) this is the robust route; keep clip
-   durations whole output frames.
+   effect; a transform applied afterwards slides every box off its object.
+   For HTML/React video frameworks (Remotion, HyperFrames) this is the
+   robust route; keep clip durations whole output frames.
 2. **Export track data, draw natively**: use path B, dump `last_tracks` and
-   `last_points` per frame to JSON, and draw boxes, lines and chips with the
-   tool's own layers (After Effects expressions, an SVG/canvas layer in
-   Remotion, Fusion shapes). Screen-blend the strokes (see method section 6).
+   `last_points` per frame to JSON (output px of the analysed frame size),
+   and draw boxes, lines and chips with the tool's own layers (After Effects
+   expressions, an SVG/canvas layer in Remotion, Fusion shapes), with the
+   strokes screen-blended. The invert/shift windows need pixel access;
+   approximate them or leave them out.
 3. **Reimplement**: follow `references/method.md`, which specifies every step
-   (masks, kernels, thresholds, tracking, drawing, blend formulas) and maps
-   them to TouchDesigner, shaders/game engines and p5.js/Processing. In
-   TouchDesigner, the built-in Blob Track TOP gives a close look quickly,
-   though its boxes and IDs will differ from this method.
+   and ends with a table of likely building blocks in TouchDesigner, game
+   engines/shaders and p5.js/Processing. TouchDesigner's built-in Blob Track
+   TOP should give a similar look quickly, with different boxes and IDs.
 
 ## Parameters
 
@@ -216,17 +274,17 @@ Tuning:
 - **Text amount**: `labels` (0 = only the large boxes and the readout keep
   chips; 1 = every box that has room).
 - **Blend strength**: `screen` for the lines/boxes, `chip` for the labels;
-  `invert 0 --shift 0` turns off the glitchy windows.
-- Always check a still at full size before rendering a long clip.
+  `--invert 0 --shift 0` turns off the glitchy windows.
+- Check a still at full size before rendering a long clip.
 
 ## Output contract
 
 - CLI: H.264 MP4 (yuv420p, tagged BT.709 primaries, transfer and matrix,
-  limited/tv range; CRF 16, `+faststart`), same frame size
-  (odd sizes lose one pixel to stay H.264-legal), same frame rate and frame
-  count as the input (variable-frame-rate sources are resampled to their
-  average rate), audio stream copied (re-encoded to AAC only if the codec
-  cannot go in MP4). `--start` / `--duration` trim both picture and sound.
+  limited/tv range; CRF 16, `+faststart`), same frame size (odd sizes lose
+  one pixel to stay H.264-legal), same frame rate and frame count as the
+  input (variable-frame-rate sources are resampled to their average rate),
+  audio stream copied (re-encoded to AAC only if the codec cannot go in
+  MP4). `--start` / `--duration` trim both picture and sound.
 - Module (Python or JS): one treated frame per input frame, same size;
   frames must arrive in order; the first three frames have no motion boxes.
 - Deterministic: the same input and parameters give the same output.
@@ -240,14 +298,12 @@ Tuning:
 | blobtrack.js in Chrome, 1080x1920 | about 77 ms/frame |
 | web app end to end (decode + effect + encode) | about 94 ms/frame |
 
-Detection always runs at a 540 px short side, so 4K costs well under 4x
-the 1080p time.
-
 ## Before you finish
 
-- Look at a frame of the output (extract a PNG) rather than trusting that
-  the command succeeded; check boxes sit on objects and chips are legible.
+- Look at a frame of the output (extract a PNG into the temp directory)
+  rather than trusting that the command succeeded; check boxes sit on
+  objects and chips are legible.
 - If it looks wrong, read `references/traps.md` (OpenCV.js freeze, missing
   font, VFR sources, crop-after-analysis, HDR clips, and more).
-- For reimplementation or exact numbers, `references/method.md` is the
-  full specification; the code in `scripts/blobtrack.py` is the authority.
+- For reimplementation or exact numbers, `references/method.md` is the full
+  specification; the code in `scripts/blobtrack.py` is the authority.

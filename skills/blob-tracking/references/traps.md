@@ -9,7 +9,7 @@ Contents
 - Drawing: screen blend needs a white stroke layer
 - Porting / parity: percentile · trunc vs floor · uint8 thresholds · corner drift between native and wasm
 - Video I/O: VFR and duplicate timestamps · old ffmpeg · odd frame sizes
-- Compositing in other tools: crop/scale after analysis · frame-exact clips in HTML video frameworks
+- Compositing in other tools: crop/scale after analysis · clip durations in HTML video frameworks
 
 ---
 
@@ -147,11 +147,15 @@ Fix for either: remux the source, which often normalises the timestamps:
 ffmpeg -i in.mp4 -c copy out.mp4
 ```
 
-### ffmpeg older than 5.1
+### Old ffmpeg builds (before 5.1 / 4.1)
 
-`-fps_mode` arrived in ffmpeg 5.1. The CLI detects the version and uses
-`-vsync passthrough` on older builds, so ffmpeg 4.x works. Git/unknown builds
-are treated as new. Needs `ffmpeg` and `ffprobe` on PATH.
+- `-fps_mode` arrived in ffmpeg 5.1. The CLI detects the version and uses
+  `-vsync passthrough` on older builds.
+- `setparams` (which tags the frames BT.709) arrived in ffmpeg 4.1. On older
+  builds the CLI leaves it out; the H.264 stream is still tagged BT.709
+  through `-x264-params`.
+- So 4.1 or newer is recommended and 4.x works. Git/unknown builds are
+  treated as new. Needs `ffmpeg` and `ffprobe` on PATH.
 
 ### Odd frame sizes
 
@@ -164,18 +168,13 @@ is at most one pixel narrower/shorter than the input.
 
 ### Don't crop or scale after analysis
 
-The boxes are measured against the exact pixels that were analysed. A crop,
-scale, reframe, stabilisation or speed ramp applied *after* the effect slides
-every box off its object (and changes stroke widths). Apply all of that to
-the source first, then run the effect on the final framing. If you export
-track JSON instead of a baked video, draw it on a layer with exactly the
-analysed frame size and apply the same transform to both.
+The boxes are measured against the exact pixels that were analysed; a crop,
+scale or reframe applied after the effect slides every box off its object.
+Transform the source first, then run the effect.
 
-### Frame-exact clips in HTML video frameworks
+### Clip durations in HTML video frameworks
 
-In HTML/React video frameworks (HyperFrames, Remotion and similar), the
-robust route is to bake the effect with the CLI and place the baked video as
-a clip. Keep every clip's duration a whole number of **output** frames
-(`frames / fps`); a duration that is not a whole number of frames can render
-as blank frames, and only a full render shows it. Render once and scrub the cut points before trusting a
-preview.
+In HTML/React video frameworks (HyperFrames, Remotion and similar), a clip
+whose duration is not a whole number of output frames can render as blank
+frames, and only a full render shows it. Keep every baked clip's duration at
+`whole_frames / fps`.

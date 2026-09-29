@@ -14,7 +14,7 @@ Contents
 4. Track
 5. Draw
 6. Composite
-7. Parameters and defaults
+7. Parameters and constants
 8. Porting checklist (for pixel/ID parity)
 9. Mapping the method onto other tools
 
@@ -128,8 +128,9 @@ for b in candidates (score order):
     quota[tier(b)] -= 1; pick b
 ```
 
-The quota check comes first, and a box skipped for overlap does not use up
-quota. `IoU(a, b) = inter / (a.w*a.h + b.w*b.h - inter + 1e-6)`.
+Tier thresholds are in **output** px scaled by `k` (230 and 70 at a 1080
+short side), not working px. The quota check comes first, and a box skipped
+for overlap does not use up quota. `IoU(a, b) = inter / (a.w*a.h + b.w*b.h - inter + 1e-6)`.
 
 The picked list, in pick order, is this frame's detections.
 
@@ -248,10 +249,26 @@ Rectangle semantics follow Pillow: the rectangle covers x0..x1 and y0..y1
 inclusive and the outline grows **inwards** from that edge. Lines are
 centred on their path with butt ends.
 
+Neighbour-line edge cases (the code does not exclude `i` explicitly; it
+relies on `i` sorting first at distance 0):
+
+- 1 track: no neighbour lines and no chain. 2 tracks: each has one
+  neighbour, so the pair is drawn once, plus at most one chain link.
+- Coincident centres: an earlier index at distance 0 sorts ahead of `i`, so
+  `i`'s slice can contain `i` itself (a zero-length line, which Pillow draws
+  as a single pixel) and miss a real neighbour. Keep this behaviour for
+  parity; it is harmless visually.
+
 ### 5.4 Chips layer
 
 A separate frame-sized RGBA layer. Font: JetBrains Mono Regular at `L = 18*k`
-px, text drawn from the top of the ascender. For each track, in track order:
+px, text drawn from the top of the ascender (Pillow anchor `la`; in canvas,
+`fillText` at `y + fontBoundingBoxAscent` with an alphabetic baseline). Text
+width `tw` is the advance width: Pillow `ImageDraw.textlength(text, font)`,
+canvas `measureText(text).width`. Filled rects `[x0, y0, x1, y1]` are
+inclusive of both corners, as Pillow fills them (canvas:
+`fillRect(x0, y0, x1 - x0 + 1, y1 - y0 + 1)`); the `guard` box is only used
+for the overlap test and is never drawn. For each track, in track order:
 
 ```
 if rnd(id, 8) < labels or side > big:            (large boxes always get one)
@@ -259,7 +276,7 @@ if rnd(id, 8) < labels or side > big:            (large boxes always get one)
     text = "ID %02d" % id                         if v < 0.34
          = "%.3f  %.3f" % (cx / W, cy / H)        if v < 0.67   (normalised centre, two spaces)
          = "%s%02d  A%05d" % (kind, id, int(a))   otherwise     e.g. "B07  A01234"
-    tw = advance width of text
+    tw = advance width of text (textlength / measureText)
     lx, ly = x, y - L - 7*k
     if ly < 4*k: ly = y + h + 3*k                 (below the box instead)
     guard = (lx - 4*k, ly - 4*k, lx + tw + 12*k, ly + L + 9*k)
@@ -295,25 +312,17 @@ unchanged. In an engine with blend modes: a white stroke layer in **Screen**
 mode at opacity `screen`, then the chips layer in **Normal** mode at opacity
 `chip`.
 
-## 7. Parameters and defaults
+## 7. Parameters and constants
 
-| name | default | range | meaning |
-|---|---|---|---|
-| `bright` | 90 | 0..100 | percentile above which a (blurred) pixel is bright |
-| `dark` | 9 | 0..100 | percentile below which a pixel is dark |
-| `motion` | 14 | 0..255 | grey-level difference vs 3 frames back that counts as motion |
-| `large` | 6 | int >= 0 | quota of large boxes per frame |
-| `medium` | 11 | int >= 0 | quota of medium boxes per frame |
-| `small` | 15 | int >= 0 | quota of small boxes per frame |
-| `corners` | 28 | int >= 0 | optical-flow corner markers |
-| `labels` | 0.55 | 0..1 | share of boxes with a chip (large ones always get one) |
-| `invert` | 0.18 | 0..1 | share of boxes whose contents are inverted |
-| `shift` | 0.12 | 0..1 | share of boxes whose contents are shifted |
-| `screen` | 0.70 | 0..1 | opacity of the screened strokes |
-| `chip` | 0.86 | 0..1 | opacity of the chips |
+The twelve parameters (`bright`, `dark`, `motion`, `large`, `medium`,
+`small`, `corners`, `labels`, `invert`, `shift`, `screen`, `chip`), their
+defaults, valid ranges and tuning advice are in the **Parameters** table of
+`SKILL.md`. `large`, `medium`, `small` and `corners` must be whole numbers.
 
-Fixed constants: reference short side 1080, working short side 540,
-re-seed every 45 frames, minimum frame side 60.
+Fixed constants: reference short side 1080, working short side 540, box caps
+560/1080 of W and 760/1920 of H, tier sides 230*k and 70*k, tracker distance
+normaliser 160*k, match threshold 0.25, smoothing 0.45 old / 0.55 new, IoU
+de-dup 0.45, corner re-seed every 45 frames, minimum frame side 60.
 
 ## 8. Porting checklist (for pixel/ID parity)
 
@@ -350,27 +359,12 @@ IoU > 0.9 with the same ID, and equal corner counts.
 
 ## 9. Mapping the method onto other tools
 
-This section is guidance: only the Python and browser implementations are
-tested in this repository, and none of the tool mappings below (TouchDesigner,
-After Effects, Resolve/Fusion, Remotion, HyperFrames, Unity/Unreal,
-p5.js/Processing) has been tried here. The options, from most to least
-faithful:
-
-1. **Bake, then composite.** Run the CLI (or the Python module) on the exact
-   frames the tool will show, and import the result as footage. Pixel-exact,
-   no porting. Apply every crop, scale, speed change or reframe *before*
-   analysis, never after: the boxes are measured against the exact pixels,
-   and a crop or scale applied afterwards slides every box off its object.
-2. **Export the tracks, draw natively.** Run the Python module, write
-   `last_tracks` / `last_points` per frame to JSON, and draw the strokes and
-   chips with the tool's own shapes and text (e.g. After Effects expressions,
-   an SVG/Canvas layer in Remotion or HyperFrames, Fusion shapes). Windows
-   (invert/shift) need pixel access; approximate them with an adjustment
-   layer masked to the box. The JSON is in output px of the analysed frame
-   size, so the drawing layer must use that same frame size.
-3. **Reimplement natively.** Map the steps to the tool's primitives. The
-   table names each tool's likely building blocks; it is untested, so check
-   each primitive's behaviour against sections 3 to 6:
+Untested guidance: only the Python and browser implementations are tested in
+this repository, and none of these mappings has been tried here. Baking the
+effect with the CLI, or exporting track data and drawing it natively, is
+often simpler; see "D. Other tools" in `SKILL.md`. For a native
+reimplementation, these are each tool's likely building blocks; check each
+one's behaviour against sections 3 to 6:
 
 | step | TouchDesigner | Unity / Unreal / shader | p5.js / Processing |
 |---|---|---|---|
