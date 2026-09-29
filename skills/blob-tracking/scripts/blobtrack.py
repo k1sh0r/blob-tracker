@@ -137,6 +137,8 @@ def _check_params(cfg):
     for name, val in cfg.items():
         if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
             raise BlobTrackError("--%s must be a number, got %r" % (name, val))
+        if not math.isfinite(val):
+            raise BlobTrackError("--%s must be a finite number, got %r" % (name, val))
         if name in _INT_PARAMS and float(val) != int(val):
             raise BlobTrackError("--%s must be a whole number, got %r" % (name, val))
     for name in _PERCENT:
@@ -600,7 +602,9 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
         cmd += ["-c:a", "copy"] if info["audio"] in MP4_AUDIO else ["-c:a", "aac", "-b:a", "192k"]
     cmd += ["-movflags", "+faststart", dst]
 
-    total = int(round((duration or max(0.0, info["duration"] - (start or 0))) * info["fps"]))
+    remaining = max(0.0, info["duration"] - (start or 0)) if info["duration"] > 0 else None
+    span = min(duration, remaining) if duration and remaining is not None else (duration or remaining or 0.0)
+    total = int(round(span * info["fps"]))
     err = tempfile.TemporaryFile()
     enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err)
     n, ok = 0, False

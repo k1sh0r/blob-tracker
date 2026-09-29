@@ -1,5 +1,5 @@
 # Exact versions the reference detections in tests/fixtures/ were made with.
-# test_reference_json_is_current and the golden test skip under any other OpenCV.
+# test_reference_json_is_current skips under any other OpenCV version.
 numpy==2.5.3
 opencv-python-headless==4.10.0.84
 pillow==12.3.0

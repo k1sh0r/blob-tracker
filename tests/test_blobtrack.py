@@ -197,6 +197,14 @@ def test_cli_warns_on_truncated_input(tmp_path):
     assert 0 < n < 54
 
 
+def test_cli_no_truncation_warning_when_duration_runs_past_the_end(tmp_path):
+    dst = str(tmp_path / "out.mp4")
+    r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", dst, "--start", "1.5", "--duration", "10")
+    assert r.returncode == 0, r.stderr
+    assert "truncated" not in r.stderr, r.stderr
+    assert int(ffprobe(dst)[0]["nb_read_frames"]) == 15
+
+
 def test_ffmpeg_version_and_passthrough_flag():
     assert blobtrack.parse_ffmpeg_version("ffmpeg version 7.1.1 Copyright (c) 2000-2025") == (7, 1)
     assert blobtrack.parse_ffmpeg_version("ffmpeg version n4.4.2 Copyright") == (4, 4)
@@ -237,7 +245,8 @@ def test_process_contract(shapes_frames):
 
 @pytest.mark.parametrize("params", [
     {"bright": 150}, {"dark": -1}, {"labels": 1.5}, {"invert": -0.1}, {"screen": 2},
-    {"chip": float("nan")}, {"large": -1}, {"corners": 2.5}, {"motion": 256}, {"small": "many"},
+    {"chip": float("nan")}, {"large": float("inf")}, {"medium": float("nan")}, {"bright": float("-inf")},
+    {"large": -1}, {"corners": 2.5}, {"motion": 256}, {"small": "many"},
 ])
 def test_rejects_out_of_range_params(params):
     with pytest.raises(blobtrack.BlobTrackError) as e:
