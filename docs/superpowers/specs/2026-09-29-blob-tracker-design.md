@@ -75,8 +75,8 @@ Tuned at 1080×1920. For a frame of size W×H:
 - Detection runs at a **working resolution** whose short side is 540
   (`S = 540 / min(W, H)`, INTER_LINEAR resize of the grey frame). All area
   thresholds below are in working-resolution pixels and need no scaling.
-- Box caps are fractions of the frame: `w ≤ 0.52·W`, `h ≤ 0.40·H`
-  (the original 560×760 at 1080×1920).
+- Box caps are fractions of the frame: `w ≤ W·560/1080`, `h ≤ H·760/1920`
+  (exactly the original 560×760 at 1080×1920; ≈0.519·W, ≈0.396·H).
 - Tier thresholds (on `sqrt(w·h)` in output px): large > 230·k, medium > 70·k.
 - Tracker distance normaliser: 160·k.
 
