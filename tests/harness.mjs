@@ -15,13 +15,14 @@ const TYPES = {
   ".png": "image/png", ".ttf": "font/ttf", ".css": "text/css", ".mp4": "video/mp4",
 };
 
-/** Serve ROOT on a free 127.0.0.1 port. Resolves with the http.Server. */
+/** Serve ROOT (a directory serves its index.html) on a free 127.0.0.1 port. Resolves with the http.Server. */
 export function serve() {
   const server = createServer(async (req, res) => {
     try {
       const path = normalize(decodeURIComponent(new URL(req.url, "http://x").pathname));
-      const file = join(ROOT, path);
+      let file = join(ROOT, path);
       if (file !== ROOT && !file.startsWith(ROOT + sep)) throw Object.assign(new Error("outside root"), { code: "ENOENT" });
+      if ((await stat(file)).isDirectory()) file = join(file, "index.html");
       if (!(await stat(file)).isFile()) throw Object.assign(new Error("not a file"), { code: "ENOENT" });
       res.writeHead(200, { "content-type": TYPES[extname(file)] || "application/octet-stream", "cache-control": "no-store" });
       res.end(await readFile(file));
