@@ -21,13 +21,35 @@ sys.path.insert(0, HERE)
 import make_fixtures as mf  # noqa: E402  (also puts blobtrack on sys.path)
 import blobtrack  # noqa: E402
 
-TEASER = "/path/to/teaser-pending"
-TEASER_TOOL = os.path.join(TEASER, "tools", "blobtrack.py")
-TEASER_FONT = os.path.join(TEASER, "fonts", "JetBrainsMono.ttf")
+# The golden test compares against the original teaser tool, which is not part
+# of this repo: point BLOBTRACK_TEASER_DIR at the directory holding that
+# blobtrack.py (its fonts/ directory is expected beside it, one level up).
+TEASER_DIR = os.environ.get("BLOBTRACK_TEASER_DIR")
+TEASER_TOOL = os.path.join(TEASER_DIR, "blobtrack.py") if TEASER_DIR else None
+TEASER_FONT = os.path.join(TEASER_DIR, "..", "fonts", "JetBrainsMono.ttf") if TEASER_DIR else None
+
+FFMPEG = blobtrack.ffmpeg_version()
+
+
+def reference(clip):
+    with open(os.path.join(FIX, clip, "reference.json")) as fh:
+        return json.load(fh)
+
+
+def skip_unless_reference_opencv():
+    want = reference("shapes")["opencv"]
+    if cv2.__version__ != want:
+        pytest.skip("reference detections were made with OpenCV %s, this is %s; "
+                    "install tests/requirements-dev.txt for exact comparisons" % (want, cv2.__version__))
 
 
 @pytest.fixture(scope="session", autouse=True)
 def fixtures_present():
+    """Make sure the committed fixtures exist.
+
+    If any are missing this regenerates them by running make_fixtures.py,
+    which writes into the source tree (tests/fixtures/), not a temp dir.
+    """
     need = [os.path.join(FIX, c, "reference.json") for c in ("shapes", "pan")]
     if not all(os.path.exists(p) for p in need):
         subprocess.run([sys.executable, os.path.join(HERE, "make_fixtures.py")], check=True)
@@ -93,6 +115,8 @@ def test_cli_landscape_input_without_audio(tmp_path):
     assert ao == []
 
 
+@pytest.mark.skipif(FFMPEG is not None and FFMPEG < (6, 0),
+                    reason="building the rotated input needs ffmpeg >= 6 (-display_rotation)")
 def test_cli_rotated_and_odd_sized_input(tmp_path):
     # a phone-style file: odd coded size plus a 90-degree display rotation
     src = str(tmp_path / "rot.mp4")
@@ -125,6 +149,66 @@ def test_cli_reencodes_audio_mp4_cannot_carry(tmp_path):
     assert [a["codec_name"] for a in ao] == ["aac"]
 
 
+def test_cli_rejects_out_of_range_params(tmp_path):
+    src = os.path.join(FIX, "pan.mp4")
+    for args, needle in ((["--bright", "150"], "--bright"), (["--labels", "1.5"], "--labels"),
+                         (["--corners", "-1"], "--corners"), (["--motion", "300"], "--motion")):
+        r = run_cli(src, "-o", str(tmp_path / "out.mp4"), *args)
+        assert r.returncode == 1, (args, r.stderr)
+        assert needle in r.stderr and "Traceback" not in r.stderr, r.stderr
+    assert not (tmp_path / "out.mp4").exists()
+    r = run_cli(src, "-o", str(tmp_path / "out.mp4"), "--crf", "60")
+    assert r.returncode == 2 and "--crf" in r.stderr
+
+
+def test_cli_rejects_tiny_input(tmp_path):
+    src = str(tmp_path / "tiny.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=6x6:d=0.2:r=30",
+                    "-c:v", "libx264", "-pix_fmt", "yuv444p", src], check=True)
+    r = run_cli(src, "-o", str(tmp_path / "out.mp4"))
+    assert r.returncode == 1
+    assert "6x6" in r.stderr and "Traceback" not in r.stderr, r.stderr
+
+
+def test_cli_refuses_to_overwrite_input_through_a_symlink(tmp_path):
+    src = tmp_path / "in.mp4"
+    src.write_bytes(open(os.path.join(FIX, "pan.mp4"), "rb").read())
+    before = src.read_bytes()
+    link = tmp_path / "link.mp4"
+    link.symlink_to(src)
+    for s, d in ((src, link), (link, src)):
+        r = run_cli(str(s), "-o", str(d))
+        assert r.returncode == 1 and "overwrite the input" in r.stderr, r.stderr
+    hard = tmp_path / "hard.mp4"
+    os.link(src, hard)
+    r = run_cli(str(src), "-o", str(hard))
+    assert r.returncode == 1 and "overwrite the input" in r.stderr
+    assert src.read_bytes() == before
+
+
+def test_cli_warns_on_truncated_input(tmp_path):
+    src = tmp_path / "trunc.mp4"
+    src.write_bytes(open(os.path.join(FIX, "shapes.mp4"), "rb").read()[:1_000_000])
+    dst = str(tmp_path / "out.mp4")
+    r = run_cli(str(src), "-o", dst, "--no-audio")
+    assert r.returncode == 0, r.stderr
+    assert "truncated" in r.stderr
+    n = int(ffprobe(dst)[0]["nb_read_frames"])
+    assert 0 < n < 54
+
+
+def test_ffmpeg_version_and_passthrough_flag():
+    assert blobtrack.parse_ffmpeg_version("ffmpeg version 7.1.1 Copyright (c) 2000-2025") == (7, 1)
+    assert blobtrack.parse_ffmpeg_version("ffmpeg version n4.4.2 Copyright") == (4, 4)
+    assert blobtrack.parse_ffmpeg_version("ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright") == (4, 4)
+    assert blobtrack.parse_ffmpeg_version("ffmpeg version N-112233-gabcdef Copyright") is None
+    assert blobtrack.passthrough_args((4, 4)) == ["-vsync", "passthrough"]
+    assert blobtrack.passthrough_args((5, 0)) == ["-vsync", "passthrough"]
+    assert blobtrack.passthrough_args((5, 1)) == ["-fps_mode", "passthrough"]
+    assert blobtrack.passthrough_args(None) == ["-fps_mode", "passthrough"]
+    assert FFMPEG is None or FFMPEG >= (4, 0)
+
+
 def test_cli_unreadable_input_exits_1(tmp_path):
     bad = tmp_path / "bad.mp4"
     bad.write_bytes(b"not a video")
@@ -149,6 +233,25 @@ def test_process_contract(shapes_frames):
         bt.process(np.zeros((100, 100, 3), np.uint8))
     with pytest.raises(TypeError):
         blobtrack.BlobTracker(1080, 1920, brite=90)
+
+
+@pytest.mark.parametrize("params", [
+    {"bright": 150}, {"dark": -1}, {"labels": 1.5}, {"invert": -0.1}, {"screen": 2},
+    {"chip": float("nan")}, {"large": -1}, {"corners": 2.5}, {"motion": 256}, {"small": "many"},
+])
+def test_rejects_out_of_range_params(params):
+    with pytest.raises(blobtrack.BlobTrackError) as e:
+        blobtrack.BlobTracker(1080, 1920, **params)
+    assert next(iter(params)) in str(e.value)
+
+
+def test_rejects_tiny_frames():
+    with pytest.raises(blobtrack.BlobTrackError, match="6x6"):
+        blobtrack.BlobTracker(6, 6)
+    for w, h in ((60, 60), (61, 107)):            # the smallest accepted sizes still run
+        bt = blobtrack.BlobTracker(w, h)
+        for _ in range(4):
+            assert bt.process(np.full((h, w, 3), 128, np.uint8)).shape == (h, w, 3)
 
 
 def test_deterministic(shapes_frames):
@@ -212,9 +315,9 @@ def test_resolution_scaling(shapes_frames):
 
 def test_reference_json_is_current(shapes_frames, pan_frames):
     """The committed reference detections (consumed by the JS parity test) match the module."""
+    skip_unless_reference_opencv()
     for clip, frames in (("shapes", shapes_frames), ("pan", pan_frames)):
-        with open(os.path.join(FIX, clip, "reference.json")) as fh:
-            ref = json.load(fh)
+        ref = reference(clip)
         assert ref["frame_count"] == len(frames) == 60
         tracks, points = mf.track_frames(frames, ref["params"])
         assert tracks == ref["tracks"], clip
@@ -223,10 +326,11 @@ def test_reference_json_is_current(shapes_frames, pan_frames):
 
 
 # ------------------------------------------------------ golden vs the teaser
-@pytest.mark.skipif(not os.path.exists(TEASER_TOOL),
-                    reason="original teaser blobtrack.py is not present (only on the author's machine)")
+@pytest.mark.skipif(not (TEASER_TOOL and os.path.exists(TEASER_TOOL)),
+                    reason="set BLOBTRACK_TEASER_DIR to the original teaser tools/ directory to run")
 def test_matches_teaser_original(shapes_frames):
     """At 1080x1920 with the teaser config, detections, tracks, corners and pixels match the original."""
+    skip_unless_reference_opencv()
     sys.dont_write_bytecode = True                      # the teaser repo is read-only
     try:
         sys.path.insert(0, os.path.dirname(TEASER_TOOL))

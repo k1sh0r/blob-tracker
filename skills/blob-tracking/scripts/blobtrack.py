@@ -39,12 +39,28 @@ Notes for anyone porting this (numbers must match for parity):
     rows y..y+h and columns x..x+w inclusive (working px, clipped to the frame);
   * percentiles use linear interpolation (numpy's default);
   * drawn widths are max(1, int(n*k + 0.5)); every other drawn size is n*k.
+    That includes the corner ticks: their width is the box width plus
+    max(1, int(2*k + 0.5)), i.e. "+2" only at k = 1;
+  * Python int() truncates toward zero: the window shift dx, dy are negative
+    about half the time, so use Math.trunc, not Math.floor;
+  * the ordering relies on stable sorts at three sites -- candidate blobs by
+    descending score, the two nearest neighbours of each centroid, and the
+    chain of centroids ordered by x -- ties keep insertion (then index) order;
+  * rnd() takes sin() of arguments in the tens of thousands; libm results may
+    differ in the last ulp between platforms, which only matters when a value
+    lands exactly on a threshold (0.45, 0.5, labels, invert, ...);
+  * chip text uses printf-style "%.3f" and "%02d"; %.3f rounds exact binary
+    ties the way C does, which can differ from JS toFixed in the last digit.
 """
 import argparse
+import contextlib
+import functools
+import json
 import math
 import os
 import shutil
 import subprocess
+import re
 import sys
 import tempfile
 
@@ -103,10 +119,37 @@ HELP = {
     "chip": "opacity of the label chips (0-1)",
 }
 
+_PERCENT = ("bright", "dark")
+_SHARES = ("labels", "invert", "shift", "screen", "chip")
+MIN_SIDE = 60       # smallest frame side: keeps the 18*k label font at >= 1 px
+
 REF = 1080          # short side the look was tuned at
 WORK = 540          # short side detection runs at
 RESEED_EVERY = 45   # frames between corner re-seeds
 WHITE = (255, 255, 255)
+
+
+class BlobTrackError(ValueError):
+    """A user-facing error: bad parameters, missing tools, unreadable input."""
+
+
+def _check_params(cfg):
+    for name, val in cfg.items():
+        if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
+            raise BlobTrackError("--%s must be a number, got %r" % (name, val))
+        if name in _INT_PARAMS and float(val) != int(val):
+            raise BlobTrackError("--%s must be a whole number, got %r" % (name, val))
+    for name in _PERCENT:
+        if not 0 <= cfg[name] <= 100:
+            raise BlobTrackError("--%s is a percentile and must be 0..100, got %g" % (name, cfg[name]))
+    for name in _SHARES:
+        if not 0 <= cfg[name] <= 1:
+            raise BlobTrackError("--%s must be 0..1, got %g" % (name, cfg[name]))
+    for name in _INT_PARAMS:
+        if not cfg[name] >= 0:
+            raise BlobTrackError("--%s must be >= 0, got %g" % (name, cfg[name]))
+    if not 0 <= cfg["motion"] <= 255:
+        raise BlobTrackError("--motion is a grey-level difference and must be 0..255, got %g" % cfg["motion"])
 
 
 def rnd(i, salt):
@@ -132,10 +175,12 @@ class BlobTracker:
             raise TypeError("unknown parameter(s): %s (known: %s)"
                             % (", ".join(unknown), ", ".join(DEFAULTS)))
         self.W, self.H = int(width), int(height)
-        if self.W < 8 or self.H < 8:
-            raise ValueError("frame too small: %dx%d" % (self.W, self.H))
+        if min(self.W, self.H) < MIN_SIDE:
+            raise BlobTrackError("frame is %dx%d; blob tracking needs at least %d px on each side"
+                                 % (self.W, self.H, MIN_SIDE))
         cfg = dict(DEFAULTS)
         cfg.update(params)
+        _check_params(cfg)
         for k in _INT_PARAMS:
             cfg[k] = int(cfg[k])
         self.cfg = cfg
@@ -282,7 +327,9 @@ class BlobTracker:
                 sy = np.clip(y0 + dy, 0, H - (y1 - y0))
                 out[y0:y1, x0:x1] = base[sy:sy + (y1 - y0), sx:sx + (x1 - x0)]
 
-        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))    # strokes: screened
+        # strokes: always white, so the layer holds only their alpha (ImageDraw
+        # overwrites rather than blends, exactly as on a white RGBA layer)
+        ov = Image.new("L", (W, H), 0)
         d = ImageDraw.Draw(ov)
         chl = Image.new("RGBA", (W, H), (0, 0, 0, 0))   # chips: normal
         dc = ImageDraw.Draw(chl)
@@ -299,18 +346,18 @@ class BlobTracker:
                 if key in drawn:
                     continue
                 drawn.add(key)
-                d.line([c, cen[j]], fill=WHITE + (150,), width=w2)
+                d.line([c, cen[j]], fill=150, width=w2)
         order = sorted(range(len(cen)), key=lambda j: cen[j][0])
         for a, b in zip(order, order[1:]):
             if rnd(tracks[a]["id"], 9) < 0.5:
-                d.line([cen[a], cen[b]], fill=WHITE + (80,), width=w1)
+                d.line([cen[a], cen[b]], fill=80, width=w1)
 
         for n, (px, py) in enumerate(pts):
             s = (6 + int(rnd(n, 11) * 14)) * k
-            d.rectangle([px - s / 2, py - s / 2, px + s / 2, py + s / 2], outline=WHITE + (200,), width=w1)
+            d.rectangle([px - s / 2, py - s / 2, px + s / 2, py + s / 2], outline=200, width=w1)
             if n % 5 == 0 and cen:
                 j = min(range(len(cen)), key=lambda j: (cen[j][0] - px) ** 2 + (cen[j][1] - py) ** 2)
-                d.line([(px, py), cen[j]], fill=WHITE + (70,), width=w1)
+                d.line([(px, py), cen[j]], fill=70, width=w1)
 
         chips = []
         big, tick, cross = 230 * k, 18 * k, 9 * k
@@ -318,14 +365,14 @@ class BlobTracker:
             x0, y0, x1, y1 = t["x"], t["y"], t["x"] + t["w"], t["y"] + t["h"]
             side = math.sqrt(t["w"] * t["h"])
             wdt = self._lw(3) if side > big else w2
-            d.rectangle([x0, y0, x1, y1], outline=WHITE + (235,), width=wdt)
+            d.rectangle([x0, y0, x1, y1], outline=235, width=wdt)
             if side > 90 * k:
                 for (cx, cy, sx, sy) in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
-                    d.line([(cx, cy), (cx + sx * tick, cy)], fill=WHITE + (255,), width=wdt + w2)
-                    d.line([(cx, cy), (cx, cy + sy * tick)], fill=WHITE + (255,), width=wdt + w2)
+                    d.line([(cx, cy), (cx + sx * tick, cy)], fill=255, width=wdt + w2)
+                    d.line([(cx, cy), (cx, cy + sy * tick)], fill=255, width=wdt + w2)
             if rnd(t["id"], 7) < 0.45:
-                d.line([(c[0] - cross, c[1]), (c[0] + cross, c[1])], fill=WHITE + (230,), width=w1)
-                d.line([(c[0], c[1] - cross), (c[0], c[1] + cross)], fill=WHITE + (230,), width=w1)
+                d.line([(c[0] - cross, c[1]), (c[0] + cross, c[1])], fill=230, width=w1)
+                d.line([(c[0], c[1] - cross), (c[0], c[1] + cross)], fill=230, width=w1)
 
             if rnd(t["id"], 8) < cfg["labels"] or side > big:
                 v = rnd(t["id"], 12)
@@ -351,15 +398,52 @@ class BlobTracker:
         dc.rectangle([26 * k, H - 58 * k, 26 * k + tw + 10 * k, H - 58 * k + L + 7 * k], fill=WHITE + (255,))
         dc.text((31 * k, H - 56 * k), txt, font=fnt, fill=(0, 0, 0, 255))
 
-        # SCREEN, not over: result = base + (1 - base) * stroke * opacity.
-        b = out.astype(np.float32) / 255.0
-        o = np.asarray(ov, np.float32) / 255.0
-        s = o[..., 3:4] * o[..., :3] * cfg["screen"]
-        b = b + (1.0 - b) * s
-        c = np.asarray(chl, np.float32) / 255.0
-        ca = c[..., 3:4] * cfg["chip"]
-        b = b * (1.0 - ca) + c[..., :3] * ca
-        return (np.clip(b, 0, 1) * 255 + 0.5).astype(np.uint8)
+        return self._composite(out, ov, chl)
+
+    def _composite(self, out, ov, chl):
+        """Blend both layers into `out` (in place) and return it.
+
+        SCREEN, not over, for the strokes:  b = b + (1 - b) * stroke * alpha * screen
+        normal blend for the chips:         b = b * (1 - ca) + chip * ca
+
+        Only pixels where either layer has alpha are computed. Everywhere else
+        both terms are exactly zero and (b/255)*255 + 0.5 truncates back to b,
+        so skipping them is bit-identical to blending the whole frame.
+        """
+        boxes = [bb for bb in (ov.getbbox(), chl.getchannel("A").getbbox()) if bb]
+        if not boxes:
+            return out
+        x0, y0 = min(bb[0] for bb in boxes), min(bb[1] for bb in boxes)
+        x1, y1 = max(bb[2] for bb in boxes), max(bb[3] for bb in boxes)
+        crop = (x0, y0, x1, y1)
+        o8 = np.asarray(ov.crop(crop))
+        c8 = np.asarray(chl.crop(crop))
+        idx = np.flatnonzero((o8 != 0) | (c8[..., 3] != 0))
+        o8 = o8.reshape(-1)[idx]
+        c8 = c8.reshape(-1, 4)[idx]
+        ys, xs = np.divmod(idx, x1 - x0)
+        ys += y0
+        xs += x0
+        b = out[ys, xs].astype(np.float32)
+        b /= 255.0
+        s = o8.astype(np.float32)[:, None]      # stroke alpha x stroke colour (1.0)
+        s /= 255.0
+        s *= self.cfg["screen"]
+        t = 1.0 - b
+        t *= s
+        b += t
+        c = c8.astype(np.float32)
+        c /= 255.0
+        ca = c[:, 3:4] * self.cfg["chip"]
+        b *= 1.0 - ca
+        c3 = c[:, :3]
+        c3 *= ca
+        b += c3
+        np.clip(b, 0, 1, out=b)
+        b *= 255
+        b += 0.5
+        out[ys, xs] = b.astype(np.uint8)
+        return out
 
     # ----------------------------------------------------------- process
     def process(self, rgb):
@@ -382,10 +466,6 @@ class BlobTracker:
 
 
 # ====================================================================== CLI
-class BlobTrackError(Exception):
-    pass
-
-
 MP4_AUDIO = {"aac", "mp3", "alac", "ac3", "eac3", "opus", "flac"}
 
 
@@ -395,6 +475,28 @@ def _need_ffmpeg():
             raise BlobTrackError(
                 "%s not found on PATH. Install FFmpeg: macOS `brew install ffmpeg`, "
                 "Debian/Ubuntu `sudo apt install ffmpeg`, Windows `winget install ffmpeg`." % tool)
+    return ffmpeg_version()
+
+
+def parse_ffmpeg_version(text):
+    """(major, minor) from `ffmpeg -version` output; None for git/unknown builds."""
+    m = re.search(r"ffmpeg version\s+n?(\d+)\.(\d+)", text)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+@functools.lru_cache(maxsize=1)
+def ffmpeg_version():
+    if shutil.which("ffmpeg") is None:
+        return None
+    r = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+    return parse_ffmpeg_version(r.stdout)
+
+
+def passthrough_args(version):
+    """Keep every decoded frame as is. `-fps_mode` arrived in ffmpeg 5.1; older builds use `-vsync`."""
+    if version is not None and version < (5, 1):
+        return ["-vsync", "passthrough"]
+    return ["-fps_mode", "passthrough"]
 
 
 def _rate(s):
@@ -407,7 +509,6 @@ def _rate(s):
 
 def probe(path):
     """Size (as decoded, after rotation), frame rate and audio codec of a file."""
-    import json
     _need_ffmpeg()
     r = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path],
                        capture_output=True, text=True)
@@ -429,12 +530,15 @@ def probe(path):
     if abs(rot) % 180 == 90:
         w, h = h, w
     r_rate, avg = v.get("r_frame_rate", "0/0"), v.get("avg_frame_rate", "0/0")
-    rate = avg if _rate(avg) > 0 else r_rate
+    rr, ra = _rate(r_rate), _rate(avg)
+    # constant frame rate when the nominal and average rates agree to 0.5 %
+    cfr = rr > 0 and (ra <= 0 or abs(rr - ra) <= 0.005 * rr)
+    rate = r_rate if cfr else avg
     if _rate(rate) <= 0:
         raise BlobTrackError("%s: cannot determine the frame rate" % path)
     auds = [s for s in j.get("streams", []) if s.get("codec_type") == "audio"]
-    return {"width": w, "height": h, "rate": rate, "fps": _rate(rate),
-            "cfr": _rate(r_rate) > 0 and abs(_rate(r_rate) - _rate(avg)) < 1e-3,
+    return {"width": w, "height": h, "rate": rate, "fps": _rate(rate), "cfr": cfr,
+            "vindex": int(v["index"]),
             "audio": auds[0]["codec_name"] if auds else None,
             "duration": float(j.get("format", {}).get("duration", 0) or 0)}
 
@@ -451,10 +555,11 @@ def _span(start, duration):
 def read_frames(path, info, start=None, duration=None):
     """Yield decoded RGB frames (HxWx3 uint8) one at a time from an ffmpeg pipe."""
     W, H = info["width"], info["height"]
-    cmd = ["ffmpeg", "-v", "error", "-nostdin"] + _span(start, duration) + ["-i", path, "-map", "0:v:0"]
+    cmd = (["ffmpeg", "-v", "error", "-nostdin"] + _span(start, duration)
+           + ["-i", path, "-map", "0:%d" % info["vindex"]])
     if not info["cfr"]:
         cmd += ["-vf", "fps=%s" % info["rate"]]
-    cmd += ["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    cmd += passthrough_args(ffmpeg_version()) + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     err = tempfile.TemporaryFile()
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err)
     n = W * H * 3
@@ -476,7 +581,8 @@ def read_frames(path, info, start=None, duration=None):
 
 def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, progress=None):
     """Apply the effect to a whole file; returns the number of frames written."""
-    if os.path.abspath(src) == os.path.abspath(dst):
+    if os.path.realpath(src) == os.path.realpath(dst) or (
+            os.path.exists(src) and os.path.exists(dst) and os.path.samefile(src, dst)):
         raise BlobTrackError("output would overwrite the input")
     info = probe(src)
     W, H = info["width"], info["height"]
@@ -499,11 +605,12 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
     enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err)
     n, ok = 0, False
     try:
-        for f in read_frames(src, info, start, duration):
-            enc.stdin.write(bt.process(f).tobytes())
-            n += 1
-            if progress:
-                progress(n, total)
+        with contextlib.closing(read_frames(src, info, start, duration)) as frames:
+            for f in frames:
+                enc.stdin.write(bt.process(f).tobytes())
+                n += 1
+                if progress:
+                    progress(n, total)
         ok = True
     except BrokenPipeError:
         pass
@@ -524,6 +631,16 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
         if os.path.exists(dst):
             os.remove(dst)
         raise BlobTrackError("%s: no frames decoded (check --start / --duration)" % src)
+    if total >= 10 and n < 0.9 * total:
+        sys.stderr.write("blobtrack: warning: decoded %d frames, expected about %d; "
+                         "the input may be truncated\n" % (n, total))
+    return n
+
+
+def _crf(v):
+    n = int(v)
+    if not 0 <= n <= 51:
+        raise argparse.ArgumentTypeError("must be 0..51, got %d" % n)
     return n
 
 
@@ -538,7 +655,7 @@ def main(argv=None):
     for name, val in DEFAULTS.items():
         ap.add_argument("--" + name, type=int if name in _INT_PARAMS else float, default=val,
                         help="%s (default %s)" % (HELP[name], val))
-    ap.add_argument("--crf", type=int, default=16, help="x264 quality, lower is better (default 16)")
+    ap.add_argument("--crf", type=_crf, default=16, help="x264 quality 0-51, lower is better (default 16)")
     ap.add_argument("--no-audio", action="store_true", help="drop the audio track")
     a = ap.parse_args(argv)
     for opt in ("start", "duration"):
@@ -556,7 +673,7 @@ def main(argv=None):
 
     try:
         n = run(a.input, a.output, a.start, a.duration, a.crf, not a.no_audio, params, progress)
-    except BlobTrackError as e:
+    except (BlobTrackError, ValueError) as e:
         if tty:
             sys.stderr.write("\n")
         sys.stderr.write("blobtrack: %s\n" % e)
