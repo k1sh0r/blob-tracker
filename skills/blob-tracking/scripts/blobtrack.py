@@ -586,15 +586,54 @@ def read_frames(path, info, start=None, duration=None):
         raise BlobTrackError(msg or "ffmpeg failed decoding %s" % path)
 
 
-def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, progress=None):
-    """Apply the effect to a whole file; returns the number of frames written."""
+def _encode_filters(version):
+    """Video filters for the encoder: even size, BT.709 conversion and tags.
+
+    setparams (with its colour options) first shipped in FFmpeg 4.1, so it is
+    left out on older builds; the -x264-params tags still apply there.
+    """
+    vf = "crop=trunc(iw/2)*2:trunc(ih/2)*2,scale=out_color_matrix=bt709:out_range=tv"
+    if version is None or version >= (4, 1):
+        vf += ",setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+    return vf
+
+
+def _new_file_mode(dst):
+    """Permissions for the output: the existing file's, else 0666 minus umask."""
+    if os.path.exists(dst):
+        return os.stat(dst).st_mode & 0o7777
+    mask = os.umask(0)
+    os.umask(mask)
+    return 0o666 & ~mask
+
+
+def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, progress=None,
+        overwrite=False):
+    """Apply the effect to a whole file; returns the number of frames written.
+
+    The video is written to a temporary file beside `dst` and renamed onto it
+    only on success, so a failed run never leaves a partial file or touches an
+    existing one. An existing `dst` is refused unless `overwrite` is true.
+    """
     if os.path.realpath(src) == os.path.realpath(dst) or (
             os.path.exists(src) and os.path.exists(dst) and os.path.samefile(src, dst)):
         raise BlobTrackError("output would overwrite the input")
+    if os.path.exists(dst) and not overwrite:
+        raise BlobTrackError("%s already exists; pass --overwrite to replace it" % dst)
+    if os.path.isdir(dst):
+        raise BlobTrackError("%s is a directory" % dst)
     info = probe(src)
     W, H = info["width"], info["height"]
     bt = BlobTracker(W, H, **(params or {}))
     with_audio = audio and info["audio"] is not None
+
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(dst)),
+                                   prefix="." + os.path.basename(dst) + ".", suffix=".part")
+        os.close(fd)
+    except OSError as e:
+        raise BlobTrackError("cannot write next to %s: %s" % (dst, e.strerror or e))
+
     cmd = ["ffmpeg", "-v", "error", "-y", "-nostdin",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (W, H), "-r", info["rate"], "-i", "-"]
     if with_audio:
@@ -603,48 +642,49 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
     # Tag BT.709 on the frames (setparams) and in the H.264 VUI (x264-params).
     # The -color_* options alone are not enough: ffmpeg 7 takes colour
     # properties from the frames, and scale leaves primaries/transfer unset.
-    cmd += ["-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2,scale=out_color_matrix=bt709:out_range=tv,"
-                   "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv",
+    cmd += ["-vf", _encode_filters(ffmpeg_version()),
             "-c:v", "libx264", "-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p",
             "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
             "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
     if with_audio:
         cmd += ["-c:a", "copy"] if info["audio"] in MP4_AUDIO else ["-c:a", "aac", "-b:a", "192k"]
-    cmd += ["-movflags", "+faststart", dst]
+    cmd += ["-movflags", "+faststart", "-f", "mp4", tmp]
 
     remaining = max(0.0, info["duration"] - (start or 0)) if info["duration"] > 0 else None
     span = min(duration, remaining) if duration and remaining is not None else (duration or remaining or 0.0)
     total = int(round(span * info["fps"]))
-    err = tempfile.TemporaryFile()
-    enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err)
-    n, ok = 0, False
+    n, done = 0, False
     try:
-        with contextlib.closing(read_frames(src, info, start, duration)) as frames:
-            for f in frames:
-                enc.stdin.write(bt.process(f).tobytes())
-                n += 1
-                if progress:
-                    progress(n, total)
-        ok = True
-    except BrokenPipeError:
-        pass
-    finally:
+        err = tempfile.TemporaryFile()
+        enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err)
         try:
-            enc.stdin.close()
+            with contextlib.closing(read_frames(src, info, start, duration)) as frames:
+                for f in frames:
+                    enc.stdin.write(bt.process(f).tobytes())
+                    n += 1
+                    if progress:
+                        progress(n, total)
         except BrokenPipeError:
             pass
-        rc = enc.wait()
-        err.seek(0)
-        msg = err.read().decode(errors="replace").strip()
-        err.close()
-        if not (ok and rc == 0) and os.path.exists(dst):
-            os.remove(dst)
-    if rc != 0:
-        raise BlobTrackError(msg or "ffmpeg failed encoding %s" % dst)
-    if n == 0:
-        if os.path.exists(dst):
-            os.remove(dst)
-        raise BlobTrackError("%s: no frames decoded (check --start / --duration)" % src)
+        finally:
+            try:
+                enc.stdin.close()
+            except BrokenPipeError:
+                pass
+            rc = enc.wait()
+            err.seek(0)
+            msg = err.read().decode(errors="replace").strip()
+            err.close()
+        if rc != 0:
+            raise BlobTrackError(msg or "ffmpeg failed encoding %s" % dst)
+        if n == 0:
+            raise BlobTrackError("%s: no frames decoded (check --start / --duration)" % src)
+        os.chmod(tmp, _new_file_mode(dst))
+        os.replace(tmp, dst)
+        done = True
+    finally:
+        if not done and os.path.exists(tmp):
+            os.remove(tmp)
     if total >= 10 and n < 0.9 * total:
         sys.stderr.write("blobtrack: warning: decoded %d frames, expected about %d; "
                          "the input may be truncated\n" % (n, total))
@@ -671,6 +711,7 @@ def main(argv=None):
                         help="%s (default %s)" % (HELP[name], val))
     ap.add_argument("--crf", type=_crf, default=16, help="x264 quality 0-51, lower is better (default 16)")
     ap.add_argument("--no-audio", action="store_true", help="drop the audio track")
+    ap.add_argument("--overwrite", action="store_true", help="replace OUTPUT if it already exists")
     a = ap.parse_args(argv)
     for opt in ("start", "duration"):
         v = getattr(a, opt)
@@ -686,7 +727,8 @@ def main(argv=None):
             sys.stderr.flush()
 
     try:
-        n = run(a.input, a.output, a.start, a.duration, a.crf, not a.no_audio, params, progress)
+        n = run(a.input, a.output, a.start, a.duration, a.crf, not a.no_audio, params, progress,
+                overwrite=a.overwrite)
     except (BlobTrackError, ValueError) as e:
         if tty:
             sys.stderr.write("\n")

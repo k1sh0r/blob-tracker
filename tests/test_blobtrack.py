@@ -207,6 +207,46 @@ def test_cli_no_truncation_warning_when_duration_runs_past_the_end(tmp_path):
     assert int(ffprobe(dst)[0]["nb_read_frames"]) == 15
 
 
+def test_cli_refuses_existing_output_without_overwrite(tmp_path):
+    dst = tmp_path / "out.mp4"
+    dst.write_bytes(b"precious user file")
+    r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(dst), "--duration", "0.2")
+    assert r.returncode == 1 and "--overwrite" in r.stderr, r.stderr
+    assert dst.read_bytes() == b"precious user file"
+    assert os.listdir(tmp_path) == ["out.mp4"]
+
+
+def test_cli_overwrite_replaces_existing_output(tmp_path):
+    dst = tmp_path / "out.mp4"
+    dst.write_bytes(b"old")
+    os.chmod(dst, 0o640)
+    r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(dst), "--duration", "0.2", "--overwrite")
+    assert r.returncode == 0, r.stderr
+    assert int(ffprobe(str(dst))[0]["nb_read_frames"]) == 6
+    assert os.stat(dst).st_mode & 0o777 == 0o640              # keeps the replaced file's permissions
+    assert os.listdir(tmp_path) == ["out.mp4"]                # no temp file left behind
+
+
+def test_cli_failed_run_keeps_existing_output(tmp_path):
+    dst = tmp_path / "out.mp4"
+    dst.write_bytes(b"precious user file")
+    # starting past the end decodes no frames: the run fails after encoding began
+    r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(dst), "--start", "100", "--overwrite")
+    assert r.returncode == 1 and "no frames decoded" in r.stderr, r.stderr
+    assert dst.read_bytes() == b"precious user file"
+    assert os.listdir(tmp_path) == ["out.mp4"]
+
+
+def test_setparams_only_on_ffmpeg_that_has_its_colour_options():
+    # setparams and its colour options first shipped in FFmpeg 4.1 (commit 8d3f364630)
+    parse = blobtrack.parse_ffmpeg_version
+    old = blobtrack._encode_filters(parse("ffmpeg version 4.0.6 Copyright"))
+    assert "setparams" not in old and "out_color_matrix=bt709" in old
+    for text in ("ffmpeg version 4.1 Copyright", "ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright",
+                 "ffmpeg version 7.1.1 Copyright", "ffmpeg version N-112233-gabcdef Copyright"):
+        assert "setparams=color_primaries=bt709" in blobtrack._encode_filters(parse(text)), text
+
+
 def test_ffmpeg_version_and_passthrough_flag():
     assert blobtrack.parse_ffmpeg_version("ffmpeg version 7.1.1 Copyright (c) 2000-2025") == (7, 1)
     assert blobtrack.parse_ffmpeg_version("ffmpeg version n4.4.2 Copyright") == (4, 4)
