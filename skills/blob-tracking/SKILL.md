@@ -221,7 +221,8 @@ Tuning:
 
 ## Output contract
 
-- CLI: H.264 MP4 (yuv420p, BT.709 matrix, CRF 16, `+faststart`), same frame size
+- CLI: H.264 MP4 (yuv420p, tagged BT.709 primaries, transfer and matrix,
+  limited/tv range; CRF 16, `+faststart`), same frame size
   (odd sizes lose one pixel to stay H.264-legal), same frame rate and frame
   count as the input (variable-frame-rate sources are resampled to their
   average rate), audio stream copied (re-encoded to AAC only if the codec
