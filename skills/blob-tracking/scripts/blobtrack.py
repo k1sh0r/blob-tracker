@@ -140,6 +140,9 @@ class OutputExistsError(BlobTrackError):
         self.path = path
         super().__init__("%s already exists; pass overwrite=True to replace it" % path)
 
+    def __reduce__(self):                  # pickle/copy rebuild from the constructor args
+        return (type(self), (self.path,))
+
 
 class ParamError(BlobTrackError):
     """A bad effect parameter. `param` is its name, `detail` the rest of the
@@ -148,6 +151,18 @@ class ParamError(BlobTrackError):
     def __init__(self, param, detail):
         self.param, self.detail = param, detail
         super().__init__("%s %s" % (param, detail))
+
+    def __reduce__(self):                  # pickle/copy rebuild from the constructor args
+        return (type(self), (self.param, self.detail))
+
+
+def _check_crf(crf):
+    """x264 CRF: a whole number 0..51 (bools and non-numbers are refused)."""
+    ok = (not isinstance(crf, bool) and isinstance(crf, (int, float, np.integer, np.floating))
+          and math.isfinite(crf) and float(crf) == int(crf) and 0 <= crf <= 51)
+    if not ok:
+        raise ParamError("crf", "must be a whole number 0..51, got %r" % (crf,))
+    return int(crf)
 
 
 def _check_params(cfg):
@@ -635,10 +650,11 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
     if os.path.realpath(src) == os.path.realpath(dst) or (
             os.path.exists(src) and os.path.exists(dst) and os.path.samefile(src, dst)):
         raise BlobTrackError("output would overwrite the input")
-    if os.path.exists(dst) and not overwrite:
-        raise OutputExistsError(dst)
     if os.path.isdir(dst):
         raise BlobTrackError("%s is a directory" % dst)
+    if os.path.exists(dst) and not overwrite:
+        raise OutputExistsError(dst)
+    crf = _check_crf(crf)
     info = probe(src)
     W, H = info["width"], info["height"]
     bt = BlobTracker(W, H, **(params or {}))
@@ -696,8 +712,11 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
             raise BlobTrackError(msg or "ffmpeg failed encoding %s" % dst)
         if n == 0:
             raise BlobTrackError("%s: no frames decoded (check the start and duration)" % src)
-        os.chmod(tmp, _new_file_mode(dst))
-        os.replace(tmp, dst)
+        try:
+            os.chmod(tmp, _new_file_mode(dst))
+            os.replace(tmp, dst)
+        except OSError as e:
+            raise BlobTrackError("cannot write %s: %s" % (dst, e.strerror or e)) from e
         done = True
     finally:
         if not done and os.path.exists(tmp):
@@ -709,10 +728,15 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
 
 
 def _crf(v):
-    n = int(v)
-    if not 0 <= n <= 51:
-        raise argparse.ArgumentTypeError("must be 0..51, got %d" % n)
-    return n
+    """argparse type for --crf; errors read "argument --crf: must be ..."."""
+    try:
+        n = int(v)
+    except ValueError:
+        n = v
+    try:
+        return _check_crf(n)
+    except ParamError as e:
+        raise argparse.ArgumentTypeError(e.detail)
 
 
 def main(argv=None):
@@ -746,7 +770,7 @@ def main(argv=None):
     try:
         n = run(a.input, a.output, a.start, a.duration, a.crf, not a.no_audio, params, progress,
                 overwrite=a.overwrite)
-    except (BlobTrackError, ValueError) as e:
+    except (BlobTrackError, ValueError, OSError) as e:
         if isinstance(e, OutputExistsError):
             e = "%s already exists; pass --overwrite to replace it" % e.path
         elif isinstance(e, ParamError):

@@ -4,9 +4,12 @@ pytest suite for skills/blob-tracking/scripts/blobtrack.py (spec §8).
 Fixtures are committed under tests/fixtures/; regenerate them with
 `python tests/make_fixtures.py` (the suite does so automatically if missing).
 """
+import copy
 import importlib.util
 import json
 import os
+import pickle
+import stat
 import subprocess
 import sys
 
@@ -448,3 +451,85 @@ def test_matches_teaser_original(shapes_frames):
         assert np.array_equal(out, ref), "frame %d: max diff %d" % (i, np.abs(out.astype(int) - ref).max())
         compared += 1
     assert compared >= 30, compared
+
+
+@pytest.mark.parametrize("err, attrs", [
+    (blobtrack.ParamError("small", "must be >= 0, got -1"), {"param": "small", "detail": "must be >= 0, got -1"}),
+    (blobtrack.OutputExistsError("/some/out.mp4"), {"path": "/some/out.mp4"}),
+])
+def test_errors_survive_pickle_and_copy(err, attrs):
+    # multiprocessing pickles exceptions raised in workers
+    for clone in (pickle.loads(pickle.dumps(err)), copy.copy(err), copy.deepcopy(err)):
+        assert type(clone) is type(err)
+        assert str(clone) == str(err)
+        for k, v in attrs.items():
+            assert getattr(clone, k) == v
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_run_refuses_a_directory_as_output(tmp_path, overwrite):
+    d = tmp_path / "out.mp4"
+    d.mkdir()
+    with pytest.raises(blobtrack.BlobTrackError) as e:
+        blobtrack.run(os.path.join(FIX, "pan.mp4"), str(d), duration=0.2, overwrite=overwrite)
+    assert type(e.value) is blobtrack.BlobTrackError
+    assert str(e.value) == "%s is a directory" % d
+    assert d.is_dir() and os.listdir(tmp_path) == ["out.mp4"] and os.listdir(d) == []
+
+
+def test_cli_refuses_a_directory_as_output(tmp_path):
+    d = tmp_path / "out.mp4"
+    d.mkdir()
+    r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(d), "--duration", "0.2")
+    assert r.returncode == 1 and r.stderr.strip() == "blobtrack: %s is a directory" % d, r.stderr
+
+
+@pytest.mark.parametrize("crf", [-1, 52, 2.5, "16", True, None])
+def test_run_rejects_bad_crf(tmp_path, crf):
+    dst = tmp_path / "out.mp4"
+    with pytest.raises(blobtrack.ParamError) as e:
+        blobtrack.run(os.path.join(FIX, "pan.mp4"), str(dst), duration=0.2, crf=crf)
+    assert e.value.param == "crf" and str(e.value).startswith("crf "), str(e.value)
+    assert os.listdir(tmp_path) == []
+
+
+def test_cli_crf_errors_name_the_flag(tmp_path):
+    for bad in ("abc", "60", "2.5"):
+        r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(tmp_path / "out.mp4"), "--crf", bad)
+        assert r.returncode == 2 and "argument --crf: must be a whole number 0..51" in r.stderr, r.stderr
+        assert "_crf" not in r.stderr, r.stderr
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs POSIX permissions, not root")
+def test_cli_unwritable_output_directory_is_one_clean_line(tmp_path):
+    d = tmp_path / "ro"
+    d.mkdir()
+    os.chmod(d, 0o555)
+    try:
+        r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(d / "out.mp4"), "--duration", "0.2")
+    finally:
+        os.chmod(d, 0o755)
+    assert r.returncode == 1, r.stderr
+    assert "Traceback" not in r.stderr and r.stderr.startswith("blobtrack: "), r.stderr
+    assert len(r.stderr.strip().splitlines()) == 1, r.stderr
+    assert os.listdir(d) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags") or not hasattr(stat, "UF_IMMUTABLE"),
+                    reason="needs chflags (macOS/BSD) to make the final rename fail")
+def test_failed_final_rename_is_a_blobtrack_error(tmp_path):
+    # an immutable existing output makes os.replace() fail after the encode
+    dst = tmp_path / "out.mp4"
+    dst.write_bytes(b"precious user file")
+    os.chflags(dst, stat.UF_IMMUTABLE)
+    try:
+        with pytest.raises(blobtrack.BlobTrackError) as e:
+            blobtrack.run(os.path.join(FIX, "pan.mp4"), str(dst), duration=0.2, overwrite=True)
+        assert str(dst) in str(e.value) and isinstance(e.value.__cause__, OSError), str(e.value)
+        r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(dst), "--duration", "0.2", "--overwrite")
+        assert r.returncode == 1 and "Traceback" not in r.stderr, r.stderr
+        assert r.stderr.startswith("blobtrack: ") and len(r.stderr.strip().splitlines()) == 1, r.stderr
+    finally:
+        os.chflags(dst, 0)
+    assert dst.read_bytes() == b"precious user file"
+    assert os.listdir(tmp_path) == ["out.mp4"]                # no temp file left behind
