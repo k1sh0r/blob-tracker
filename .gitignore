@@ -8,7 +8,7 @@ __pycache__/
 # Outputs
 out/
 *-blobtrack.mp4
-tests/_out/
+tests/out/
 
 # OS
 .DS_Store

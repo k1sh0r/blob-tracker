@@ -4,6 +4,11 @@
   "type": "module",
   "description": "Blob-tracking video effect: Python CLI/module, browser ES module, web app.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/k1sh0r/blob-tracker.git"
+  },
+  "homepage": "https://github.com/k1sh0r/blob-tracker",
   "scripts": {
     "serve": "sh app/serve.sh",
     "test:parity": "node tests/parity.mjs",
