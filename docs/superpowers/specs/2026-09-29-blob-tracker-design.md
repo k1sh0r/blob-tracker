@@ -1,7 +1,10 @@
 # Blob Tracker — design
 
-**Date:** 2026-09-29 · **Status:** approved in conversation, awaiting written-spec review
-**Repo:** `this repo` → public GitHub `k1sh0r/blob-tracker` · **Licence:** MIT
+**Date:** 2026-09-29 · **Repo:** github.com/k1sh0r/blob-tracker · **Licence:** MIT
+
+> This is the original design document, kept for context. Where it differs
+> from the code, the README or `skills/blob-tracking/SKILL.md`, those are
+> authoritative; facts known to be superseded are marked below.
 
 ## 1. Purpose
 
@@ -56,16 +59,20 @@ blob-tracker/
 │  ├─ make_fixtures.py                    (generates clips and reference detections)
 │  ├─ test_blobtrack.py                   (pytest: CLI + module behaviour)
 │  └─ parity.mjs                          (headless Chrome: JS == Python)
-└─ docs/superpowers/{specs,plans}/
+└─ docs/superpowers/specs/
 ```
+
+*Superseded in detail:* the shipped `tests/` also holds `parity.html`,
+`harness.mjs`, `app-smoke.mjs` and `parity_render.py`, and the repo root
+holds `package.json` and `.claude-plugin/marketplace.json`.
 
 `app/` imports `../skills/blob-tracking/scripts/blobtrack.js` directly. There is
 exactly one JS implementation; the skill and the app cannot drift apart.
 
 ## 3. The method (normative; both implementations follow it)
 
-Derived from `video-hf/teaser-pending/tools/blobtrack.py` in the
-author's teaser project. What changes from that file is listed in §3.5.
+Derived from the `blobtrack.py` tool in the author's teaser project (not
+public). What changes from that file is listed in §3.5.
 
 ### 3.1 Resolution model
 Tuned at 1080×1920. For a frame of size W×H:
@@ -189,10 +196,14 @@ Minimal UI by instruction — no parameter controls yet.
    undecodable file, OpenCV load failure.
 
 Runs from `app/serve.sh` (static server at the repo root so `../skills/...`
-resolves). Target: current Chrome/Edge/Safari.
+resolves). Target: current Chrome/Edge/Safari. *Superseded:* only Chrome
+has been tested; the README and SKILL.md say so.
 
 Measured budget (spike, 1080×1920, M-series Mac): ~180 ms/frame in Chrome →
 a 10 s 30 fps clip ≈ 1 min. Preview is therefore process-then-play.
+*Superseded:* the shipped module measures about 77 ms/frame in Chrome and
+the app about 94 ms/frame end to end (decode + effect + encode); see
+SKILL.md, Performance.
 
 ## 7. Skill (`skills/blob-tracking/SKILL.md`)
 
@@ -259,10 +270,9 @@ Sections:
 8. **Result** — stills and one short clip from the teaser; links to the app,
    the skill and the repo.
 
-Images come from the author's own renders and generated sheets
-(`teaser-pending/`: `gen/blobtrack/`,
-`gen/edgebox/`, `renders/`, and the reference capture
-`a local reference capture (not published)`). Assumption: stills from the author's
+Images come from the author's own renders and generated sheets in the
+teaser project (blob-tracking and edge-box sheets, final renders, and a
+screen capture of the reference tool). Assumption: stills from the author's
 published teaser are fine to include publicly; raw stock source clips are not
 committed.
 
