@@ -130,7 +130,10 @@ window.PARITY = {
   // parameter validation mirrors blobtrack.py: each of these must throw
   const bad = [[59, 100, {}, "BlobTrackError"], [100, 100, { bright: 101 }, "BlobTrackError"],
     [100, 100, { large: 1.5 }, "BlobTrackError"], [100, 100, { labels: true }, "BlobTrackError"],
-    [100, 100, { motion: NaN }, "BlobTrackError"], [100, 100, { nope: 1 }, "TypeError"]];
+    [100, 100, { motion: NaN }, "BlobTrackError"], [100, 100, { nope: 1 }, "TypeError"],
+    // inherited Object.prototype names are not parameters either
+    [100, 100, { toString: 1 }, "TypeError"], [100, 100, { constructor: 1 }, "TypeError"],
+    [100, 100, JSON.parse('{"__proto__": 1}'), "TypeError"]];
   for (const [w, h, p, want] of bad) {
     let got = "no error";
     try { new BlobTracker(w, h, p).dispose(); } catch (e) { got = e.name; }

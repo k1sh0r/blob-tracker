@@ -271,7 +271,7 @@ export class BlobTracker {
     if (!ready || !globalThis.cv || !globalThis.cv.Mat)
       throw new Error("OpenCV.js is not loaded: `await loadOpenCV()` before creating a BlobTracker");
     params = params ?? {};
-    const unknown = Object.keys(params).filter(k => !(k in DEFAULTS)).sort();
+    const unknown = Object.keys(params).filter(k => !Object.hasOwn(DEFAULTS, k)).sort();
     if (unknown.length)
       throw new TypeError(`unknown parameter(s): ${unknown.join(", ")} (known: ${Object.keys(DEFAULTS).join(", ")})`);
     if (!Number.isFinite(width) || !Number.isFinite(height))
