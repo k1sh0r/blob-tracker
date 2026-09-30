@@ -158,6 +158,7 @@ def test_cli_rejects_out_of_range_params(tmp_path):
         r = run_cli(src, "-o", str(tmp_path / "out.mp4"), *args)
         assert r.returncode == 1, (args, r.stderr)
         assert needle in r.stderr and "Traceback" not in r.stderr, r.stderr
+        assert ("blobtrack: " + needle + " ") in r.stderr, r.stderr   # the flag, not the bare keyword
     assert not (tmp_path / "out.mp4").exists()
     r = run_cli(src, "-o", str(tmp_path / "out.mp4"), "--crf", "60")
     assert r.returncode == 2 and "--crf" in r.stderr
@@ -305,9 +306,20 @@ def test_process_contract(shapes_frames):
     {"large": -1}, {"corners": 2.5}, {"motion": 256}, {"small": "many"},
 ])
 def test_rejects_out_of_range_params(params):
-    with pytest.raises(blobtrack.BlobTrackError) as e:
+    name = next(iter(params))
+    with pytest.raises(blobtrack.ParamError) as e:
         blobtrack.BlobTracker(1080, 1920, **params)
-    assert next(iter(params)) in str(e.value)
+    assert isinstance(e.value, blobtrack.BlobTrackError) and e.value.param == name
+    # a Python caller sees the keyword, not the CLI flag
+    assert str(e.value).startswith(name + " ") and "--" not in str(e.value), str(e.value)
+
+
+def test_run_rejects_bad_params_by_keyword(tmp_path):
+    dst = tmp_path / "out.mp4"
+    with pytest.raises(blobtrack.ParamError) as e:
+        blobtrack.run(os.path.join(FIX, "pan.mp4"), str(dst), params={"small": -1})
+    assert str(e.value) == "small must be >= 0, got -1", str(e.value)
+    assert not dst.exists() and os.listdir(tmp_path) == []
 
 
 def test_rejects_tiny_frames():

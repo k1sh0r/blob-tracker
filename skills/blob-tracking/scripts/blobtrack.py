@@ -141,25 +141,34 @@ class OutputExistsError(BlobTrackError):
         super().__init__("%s already exists; pass overwrite=True to replace it" % path)
 
 
+class ParamError(BlobTrackError):
+    """A bad effect parameter. `param` is its name, `detail` the rest of the
+    message; str() reads "<param> <detail>" (the CLI shows "--<param> <detail>")."""
+
+    def __init__(self, param, detail):
+        self.param, self.detail = param, detail
+        super().__init__("%s %s" % (param, detail))
+
+
 def _check_params(cfg):
     for name, val in cfg.items():
         if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
-            raise BlobTrackError("--%s must be a number, got %r" % (name, val))
+            raise ParamError(name, "must be a number, got %r" % (val,))
         if not math.isfinite(val):
-            raise BlobTrackError("--%s must be a finite number, got %r" % (name, val))
+            raise ParamError(name, "must be a finite number, got %r" % (val,))
         if name in _INT_PARAMS and float(val) != int(val):
-            raise BlobTrackError("--%s must be a whole number, got %r" % (name, val))
+            raise ParamError(name, "must be a whole number, got %r" % (val,))
     for name in _PERCENT:
         if not 0 <= cfg[name] <= 100:
-            raise BlobTrackError("--%s is a percentile and must be 0..100, got %g" % (name, cfg[name]))
+            raise ParamError(name, "is a percentile and must be 0..100, got %g" % cfg[name])
     for name in _SHARES:
         if not 0 <= cfg[name] <= 1:
-            raise BlobTrackError("--%s must be 0..1, got %g" % (name, cfg[name]))
+            raise ParamError(name, "must be 0..1, got %g" % cfg[name])
     for name in _INT_PARAMS:
         if not cfg[name] >= 0:
-            raise BlobTrackError("--%s must be >= 0, got %g" % (name, cfg[name]))
+            raise ParamError(name, "must be >= 0, got %g" % cfg[name])
     if not 0 <= cfg["motion"] <= 255:
-        raise BlobTrackError("--motion is a grey-level difference and must be 0..255, got %g" % cfg["motion"])
+        raise ParamError("motion", "is a grey-level difference and must be 0..255, got %g" % cfg["motion"])
 
 
 def rnd(i, salt):
@@ -740,6 +749,8 @@ def main(argv=None):
     except (BlobTrackError, ValueError) as e:
         if isinstance(e, OutputExistsError):
             e = "%s already exists; pass --overwrite to replace it" % e.path
+        elif isinstance(e, ParamError):
+            e = "--%s %s" % (e.param, e.detail)
         if tty:
             sys.stderr.write("\n")
         sys.stderr.write("blobtrack: %s\n" % e)
