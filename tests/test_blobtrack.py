@@ -212,6 +212,20 @@ def test_cli_refuses_existing_output_without_overwrite(tmp_path):
     dst.write_bytes(b"precious user file")
     r = run_cli(os.path.join(FIX, "pan.mp4"), "-o", str(dst), "--duration", "0.2")
     assert r.returncode == 1 and "--overwrite" in r.stderr, r.stderr
+    assert "overwrite=True" not in r.stderr, r.stderr
+    assert dst.read_bytes() == b"precious user file"
+    assert os.listdir(tmp_path) == ["out.mp4"]
+
+
+def test_run_refuses_existing_output_and_names_the_keyword(tmp_path):
+    # the library error speaks to a Python caller: overwrite=True, not the CLI flag
+    dst = tmp_path / "out.mp4"
+    dst.write_bytes(b"precious user file")
+    with pytest.raises(blobtrack.OutputExistsError) as e:
+        blobtrack.run(os.path.join(FIX, "pan.mp4"), str(dst), duration=0.2)
+    assert isinstance(e.value, blobtrack.BlobTrackError)
+    assert e.value.path == str(dst)
+    assert "overwrite=True" in str(e.value) and "--overwrite" not in str(e.value), str(e.value)
     assert dst.read_bytes() == b"precious user file"
     assert os.listdir(tmp_path) == ["out.mp4"]
 

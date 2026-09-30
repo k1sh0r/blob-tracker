@@ -133,6 +133,14 @@ class BlobTrackError(ValueError):
     """A user-facing error: bad parameters, missing tools, unreadable input."""
 
 
+class OutputExistsError(BlobTrackError):
+    """run() refused to replace an existing output file; `path` is that file."""
+
+    def __init__(self, path):
+        self.path = path
+        super().__init__("%s already exists; pass overwrite=True to replace it" % path)
+
+
 def _check_params(cfg):
     for name, val in cfg.items():
         if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
@@ -619,7 +627,7 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
             os.path.exists(src) and os.path.exists(dst) and os.path.samefile(src, dst)):
         raise BlobTrackError("output would overwrite the input")
     if os.path.exists(dst) and not overwrite:
-        raise BlobTrackError("%s already exists; pass --overwrite to replace it" % dst)
+        raise OutputExistsError(dst)
     if os.path.isdir(dst):
         raise BlobTrackError("%s is a directory" % dst)
     info = probe(src)
@@ -678,7 +686,7 @@ def run(src, dst, start=None, duration=None, crf=16, audio=True, params=None, pr
         if rc != 0:
             raise BlobTrackError(msg or "ffmpeg failed encoding %s" % dst)
         if n == 0:
-            raise BlobTrackError("%s: no frames decoded (check --start / --duration)" % src)
+            raise BlobTrackError("%s: no frames decoded (check the start and duration)" % src)
         os.chmod(tmp, _new_file_mode(dst))
         os.replace(tmp, dst)
         done = True
@@ -730,6 +738,8 @@ def main(argv=None):
         n = run(a.input, a.output, a.start, a.duration, a.crf, not a.no_audio, params, progress,
                 overwrite=a.overwrite)
     except (BlobTrackError, ValueError) as e:
+        if isinstance(e, OutputExistsError):
+            e = "%s already exists; pass --overwrite to replace it" % e.path
         if tty:
             sys.stderr.write("\n")
         sys.stderr.write("blobtrack: %s\n" % e)
