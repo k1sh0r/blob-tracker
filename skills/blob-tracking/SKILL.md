@@ -55,13 +55,20 @@ result fastest.
 ### A. CLI (video file in, video file out)
 
 Keep the tool's packages in their own venv outside the user's project, and
-call that venv's interpreter directly (on Windows the interpreter is
-`%USERPROFILE%\.cache\blob-tracking\venv\Scripts\python.exe`). Once:
+call that venv's interpreter directly. Once:
 
 ```sh
 python3 -m venv ~/.cache/blob-tracking/venv
 ~/.cache/blob-tracking/venv/bin/python -m pip install -r "${CLAUDE_SKILL_DIR}/scripts/requirements.txt"
 ```
+
+On Windows a venv keeps its interpreter in `Scripts\python.exe`, not
+`bin/python`, and `python3` may not exist. In Git Bash (Claude Code's shell
+on Windows), create the venv with `py -m venv ~/.cache/blob-tracking/venv`
+and write `~/.cache/blob-tracking/venv/Scripts/python.exe` wherever the
+commands here say `~/.cache/blob-tracking/venv/bin/python`. In PowerShell,
+use `py -m venv "$HOME\.cache\blob-tracking\venv"` and
+`& "$HOME\.cache\blob-tracking\venv\Scripts\python.exe"`.
 
 Then, for a file `clip.mp4`:
 
@@ -83,7 +90,9 @@ Then, for a file `clip.mp4`:
 
 For a quick look before a full render, process two seconds into the temp
 directory and grab a still. Pick a `--start` inside the clip (a start past
-the end fails with "no frames decoded"; use `--start 0` for short clips):
+the end fails with "no frames decoded"; use `--start 0` for short clips).
+`${TMPDIR:-/tmp}` is the temp directory in a POSIX shell (macOS, Linux,
+Git Bash on Windows); in PowerShell write `$env:TEMP` instead:
 
 ```sh
 ~/.cache/blob-tracking/venv/bin/python "${CLAUDE_SKILL_DIR}/scripts/blobtrack.py" clip.mp4 -o "${TMPDIR:-/tmp}/clip-blobtrack-preview.mp4" --start 0 --duration 2 --overwrite
@@ -104,7 +113,8 @@ Add its dependencies to the project's own environment: `numpy>=1.24`,
 `scripts/requirements.txt`). If the project already has `opencv-python` or
 `opencv-contrib-python`, do not add `opencv-python-headless`: both provide
 `cv2` and conflict. For a throwaway script only, you can skip the copy and
-put `sys.path.insert(0, "${CLAUDE_SKILL_DIR}/scripts")` at the top.
+put `sys.path.insert(0, r"${CLAUDE_SKILL_DIR}/scripts")` at the top (a raw
+string, so a Windows path's backslashes survive).
 
 Frames are `H x W x 3` **RGB** `uint8` arrays, fed in order, one tracker per
 clip:
@@ -132,7 +142,8 @@ print(out_dir, bt.last_tracks)  # tracks: [{id, x, y, w, h, kind, a, age}] in ou
   before `cv2.VideoWriter`.
 - Whole file with audio from Python:
   `blobtrack.run("clip.mp4", "clip-blobtrack.mp4", params={"small": 25})`
-  (what the CLI runs; `overwrite=False` by default).
+  (what the CLI runs; `overwrite=False` by default, so an existing output
+  raises `OutputExistsError`, a `BlobTrackError`).
 - `last_tracks` / `last_points` after each `process()` are the per-frame
   data for drawing the overlay in another tool (path D).
 - Bad parameters raise `BlobTrackError` (a `ValueError`); unknown parameter
