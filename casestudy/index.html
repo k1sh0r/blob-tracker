@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tiny Windows</title>
+<meta name="description" content="How a blob-tracking effect for a 1.6-second flashback took three attempts, one reference and a frozen browser tab. A case study by Kishor.">
+<meta name="author" content="Kishor">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect x=%224%22 y=%226%22 width=%2224%22 height=%2220%22 fill=%22none%22 stroke=%22%23888%22 stroke-width=%222%22/%3E%3Crect x=%2210%22 y=%2212%22 width=%2212%22 height=%228%22 fill=%22%23888%22/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: "JBM";
+  src: url("assets/JetBrainsMono-Regular.ttf") format("truetype");
+  font-display: swap;
+}
+:root {
+  --bg: #0c0d0e;
+  --bg-2: #141517;
+  --ink: #ebe8e1;
+  --ink-2: #a9a69f;
+  --ink-3: #6f6d68;
+  --rule: rgba(235, 232, 225, .16);
+  --rule-2: rgba(235, 232, 225, .34);
+  --chip-bg: #ffffff;
+  --chip-ink: #000000;
+  --mark: #ff4628;
+  --code-bg: #121315;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Charter, "Bitstream Charter", Georgia, serif;
+  --mono: "JBM", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --measure: 38rem;
+  --gutter: clamp(16px, 4vw, 48px);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f2f0ea;
+    --bg-2: #e8e5dc;
+    --ink: #151515;
+    --ink-2: #4a4843;
+    --ink-3: #85827b;
+    --rule: rgba(21, 21, 21, .14);
+    --rule-2: rgba(21, 21, 21, .34);
+    --chip-bg: #111111;
+    --chip-ink: #ffffff;
+    --mark: #d6361b;
+    --code-bg: #e8e5dc;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f2f0ea;
+  --bg-2: #e8e5dc;
+  --ink: #151515;
+  --ink-2: #4a4843;
+  --ink-3: #85827b;
+  --rule: rgba(21, 21, 21, .14);
+  --rule-2: rgba(21, 21, 21, .34);
+  --chip-bg: #111111;
+  --chip-ink: #ffffff;
+  --mark: #d6361b;
+  --code-bg: #e8e5dc;
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: clamp(17px, 1.05vw + 12px, 20px);
+  line-height: 1.6;
+  overflow-x: hidden;
+  text-rendering: optimizeLegibility;
+}
+/* scanlines: the texture of a thing being measured */
+body::before {
+  content: "";
+  position: fixed; inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, transparent 0 2px, rgba(128,128,128,.035) 2px 3px);
+  z-index: 0;
+}
+main, header, footer { position: relative; z-index: 1; }
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: .18em; text-decoration-color: var(--rule-2); }
+a:hover { text-decoration-color: var(--mark); }
+img, video { display: block; max-width: 100%; height: auto; }
+::selection { background: var(--chip-bg); color: var(--chip-ink); }
+
+.chip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .02em;
+  line-height: 1;
+  padding: .42em .6em .38em;
+  background: var(--chip-bg);
+  color: var(--chip-ink);
+  white-space: nowrap;
+}
+.mono { font-family: var(--mono); font-size: .82em; }
+
+/* ---------- readout (the effect's own bottom-left chip, for the page) */
+.readout {
+  position: fixed; left: var(--gutter); bottom: 16px; z-index: 5;
+  font-family: var(--mono); font-size: .66rem; line-height: 1;
+  padding: .5em .65em .45em;
+  background: var(--chip-bg); color: var(--chip-ink);
+  opacity: .86;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.theme-toggle {
+  position: fixed; right: var(--gutter); top: 14px; z-index: 5;
+  font-family: var(--mono); font-size: .66rem;
+  background: transparent; color: var(--ink-2);
+  border: 1px solid var(--rule-2); padding: .5em .7em; cursor: pointer;
+}
+.theme-toggle:hover { color: var(--ink); border-color: var(--ink); }
+.theme-toggle:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
+
+/* ---------- hero */
+.hero {
+  min-height: min(100svh, 980px);
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr);
+  gap: clamp(24px, 5vw, 80px);
+  align-items: end;
+  padding: clamp(64px, 10vh, 120px) var(--gutter) clamp(40px, 7vh, 80px);
+  max-width: 1320px; margin: 0 auto;
+}
+.hero .kicker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 28px; }
+.hero h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: clamp(3rem, 9vw, 7.6rem);
+  line-height: .92;
+  letter-spacing: -.035em;
+  margin: 0 0 .35em;
+}
+.hero h1 em { font-style: italic; color: var(--ink-2); }
+.hero .dek { font-size: clamp(1.1rem, 1.4vw + .6rem, 1.45rem); line-height: 1.45; color: var(--ink-2); max-width: 34rem; margin: 0 0 1.6em; }
+.hero .meta { font-family: var(--mono); font-size: .72rem; color: var(--ink-3); line-height: 1.8; }
+.hero .meta b { color: var(--ink); font-weight: 400; }
+.hero-video { justify-self: end; width: 100%; max-width: 360px; }
+.boxed { position: relative; }
+.boxed::before, .boxed::after {
+  content: ""; position: absolute; width: 18px; height: 18px; pointer-events: none; z-index: 2;
+  border-color: var(--ink); border-style: solid;
+}
+.boxed::before { left: -7px; top: -7px; border-width: 2px 0 0 2px; }
+.boxed::after { right: -7px; bottom: -7px; border-width: 0 2px 2px 0; }
+.hero-video figcaption { margin-top: 12px; }
+
+/* ---------- sections */
+.section {
+  padding: clamp(56px, 9vw, 120px) var(--gutter) 0;
+  max-width: 1320px; margin: 0 auto;
+}
+.sec-head {
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  border-top: 1px solid var(--rule);
+  padding-top: 18px; margin-bottom: clamp(24px, 4vw, 48px);
+}
+.sec-head .label { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.sec-head .label .coord { font-family: var(--mono); font-size: .66rem; color: var(--ink-3); margin-left: 6px; }
+.sec-head h2 {
+  font-weight: 400; font-size: clamp(2rem, 4.6vw, 3.6rem); line-height: 1.02; letter-spacing: -.025em;
+  margin: .45em 0 0; max-width: 16ch;
+}
+.sec-head h2 em { color: var(--ink-2); }
+.prose { max-width: var(--measure); }
+.prose p { margin: 0 0 1.1em; }
+.prose h3 {
+  font-family: var(--mono); font-weight: 400; font-size: .74rem; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-2); margin: 2.2em 0 .9em;
+}
+.prose ol, .prose ul { padding-left: 1.2em; margin: 0 0 1.2em; }
+.prose li { margin: 0 0 .45em; }
+.prose li::marker { font-family: var(--mono); color: var(--ink-3); font-size: .8em; }
+blockquote.note {
+  margin: 1.6em 0; padding: 0;
+  font-size: clamp(1.25rem, 1.6vw + .7rem, 1.7rem); line-height: 1.3; font-style: italic;
+  letter-spacing: -.01em;
+}
+blockquote.note::before { content: "NOTE"; display: block; font-style: normal; margin-bottom: .7em; }
+blockquote.note::before { font-family: var(--mono); font-size: .62rem; letter-spacing: .04em; padding: .42em .6em .38em; background: var(--chip-bg); color: var(--chip-ink); width: max-content; }
+blockquote.note cite { display: block; font-style: normal; font-family: var(--mono); font-size: .66rem; color: var(--ink-3); margin-top: .8em; }
+code { font-family: var(--mono); font-size: .84em; }
+pre {
+  font-family: var(--mono); font-size: .76rem; line-height: 1.6;
+  background: var(--code-bg); border: 1px solid var(--rule);
+  padding: 16px 18px; overflow-x: auto; margin: 1.4em 0; max-width: 100%;
+}
+pre .c { color: var(--ink-3); }
+pre .bad { color: var(--mark); }
+
+/* two-column: prose + figure rail */
+.split { display: grid; grid-template-columns: minmax(0, var(--measure)) minmax(0, 1fr); gap: clamp(24px, 5vw, 72px); align-items: start; }
+.split > figure { position: sticky; top: 72px; }
+
+figure { margin: 0; }
+figcaption { font-family: var(--mono); font-size: .68rem; line-height: 1.55; color: var(--ink-2); margin-top: 10px; max-width: 46rem; }
+figcaption .chip { margin-right: 6px; }
+.fig-wide { margin: clamp(32px, 5vw, 64px) 0; }
+.fig-grid { display: grid; gap: clamp(10px, 1.6vw, 20px); }
+.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tile { position: relative; background: var(--bg-2); }
+.tile .chip { position: absolute; left: 8px; top: 8px; z-index: 2; }
+.tile img, .tile video { width: 100%; }
+.portrait { max-width: 420px; }
+
+/* pipeline diagram (section 3) */
+.pipeline { list-style: none; padding: 0; margin: clamp(28px, 4vw, 48px) 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--rule-2); }
+.pipeline li { padding: 16px 16px 18px; border-right: 1px solid var(--rule); position: relative; min-width: 0; }
+.pipeline li:last-child { border-right: 0; }
+.pipeline li:not(:last-child)::after {
+  content: "→"; position: absolute; right: -.6em; top: 14px; z-index: 2;
+  background: var(--bg); padding: 0 .15em; font-family: var(--mono); font-size: .8rem; color: var(--ink-2);
+}
+.pipeline .n { font-family: var(--mono); font-size: .62rem; color: var(--ink-3); }
+.pipeline .t { display: block; font-family: var(--mono); font-size: .78rem; margin: .5em 0 .6em; letter-spacing: .02em; }
+.pipeline p { margin: 0; font-size: .86rem; line-height: 1.45; color: var(--ink-2); }
+.pipeline .ours { display: block; margin-top: .8em; font-family: var(--mono); font-size: .64rem; color: var(--ink-3); line-height: 1.5; }
+
+/* compare slider */
+.compare { position: relative; overflow: hidden; background: var(--bg-2); user-select: none; -webkit-user-select: none; touch-action: pan-y; }
+.compare img { width: 100%; }
+.compare .top { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--pos, 50%)); }
+.compare .top img { width: 100%; height: 100%; object-fit: cover; }
+.compare .bar { position: absolute; top: 0; bottom: 0; left: var(--pos, 50%); width: 1px; background: #fff; mix-blend-mode: difference; pointer-events: none; }
+.compare .knob { position: absolute; top: 50%; left: var(--pos, 50%); transform: translate(-50%, -50%); pointer-events: none; }
+.compare input[type=range] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; margin: 0; }
+.compare .l, .compare .r { position: absolute; top: 8px; z-index: 2; }
+.compare .l { left: 8px; } .compare .r { right: 8px; }
+
+/* spike chart */
+.spike { margin: clamp(28px, 4vw, 44px) 0; border-top: 1px solid var(--rule); }
+.spike .row { display: grid; grid-template-columns: minmax(0, 9.5rem) minmax(0, 1fr); gap: 14px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.spike .name { font-family: var(--mono); font-size: .72rem; line-height: 1.35; }
+.spike .name small { display: block; color: var(--ink-3); font-size: .62rem; margin-top: 3px; }
+.spike .track { position: relative; height: 22px; margin-right: 11.5rem; }
+.spike .bar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ink); width: 0; transition: width 1.1s cubic-bezier(.2,.7,.2,1); }
+.spike.on .bar { width: var(--w); }
+.spike .bar.load { background: transparent; border: 1px dashed var(--ink-3); left: auto; }
+.spike .val { position: absolute; top: 50%; transform: translateY(-50%); left: calc(var(--w) + 8px); font-family: var(--mono); font-size: .7rem; white-space: nowrap; color: var(--ink); }
+.spike .match { font-family: var(--mono); font-size: .62rem; color: var(--ink-3); }
+.spike-foot { font-family: var(--mono); font-size: .66rem; line-height: 1.6; color: var(--ink-3); margin: 10px 0 clamp(32px, 5vw, 56px); max-width: 46rem; }
+
+/* lessons + links */
+.lessons { list-style: none; counter-reset: l; padding: 0; margin: clamp(28px, 4vw, 48px) 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: clamp(16px, 3vw, 36px); }
+.lessons li { counter-increment: l; border-top: 1px solid var(--rule-2); padding-top: 14px; font-size: 1rem; line-height: 1.45; }
+.lessons li::before { content: "0" counter(l); display: block; font-family: var(--mono); font-size: .66rem; color: var(--ink-3); margin-bottom: .7em; }
+.links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border: 1px solid var(--rule-2); margin: clamp(28px, 4vw, 48px) 0; }
+.links a { display: block; padding: 20px 18px 22px; text-decoration: none; border-right: 1px solid var(--rule); min-width: 0; transition: background .2s; }
+.links a:last-child { border-right: 0; }
+.links a:hover { background: var(--bg-2); }
+.links .chip { margin-bottom: 14px; }
+.links strong { display: block; font-weight: 400; font-size: 1.3rem; line-height: 1.15; letter-spacing: -.01em; }
+.links span.d { display: block; font-size: .88rem; color: var(--ink-2); margin-top: .4em; line-height: 1.4; }
+.links span.u { display: block; font-family: var(--mono); font-size: .62rem; color: var(--ink-3); margin-top: .9em; overflow-wrap: anywhere; }
+
+footer.credits {
+  max-width: 1320px; margin: clamp(64px, 9vw, 120px) auto 0; padding: 24px var(--gutter) 88px;
+  border-top: 1px solid var(--rule);
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 24px;
+  font-family: var(--mono); font-size: .68rem; line-height: 1.7; color: var(--ink-2);
+}
+footer.credits h2 { font-family: var(--mono); font-weight: 400; font-size: .68rem; margin: 0; color: var(--ink); }
+footer.credits dl { margin: 0; display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr); gap: 10px 18px; }
+footer.credits dt { color: var(--ink-3); }
+footer.credits dd { margin: 0; overflow-wrap: anywhere; }
+
+/* reveal */
+.rv { opacity: 0; transform: translateY(14px); transition: opacity .8s ease, transform .8s ease; }
+.rv.in { opacity: 1; transform: none; }
+.hero .rv:nth-child(2) { transition-delay: .08s; }
+.hero .rv:nth-child(3) { transition-delay: .16s; }
+.hero .rv:nth-child(4) { transition-delay: .24s; }
+@media (prefers-reduced-motion: reduce) {
+  .rv { opacity: 1; transform: none; transition: none; }
+  .spike .bar { transition: none; }
+}
+@media (scripting: none) { .rv { opacity: 1; transform: none; } .spike .bar { width: var(--w); } }
+
+/* ---------- responsive */
+@media (max-width: 960px) {
+  .hero { grid-template-columns: minmax(0, 1fr); align-items: start; min-height: 0; }
+  .hero-video { justify-self: start; max-width: 300px; }
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .split > figure { position: static; }
+  .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pipeline li:nth-child(2) { border-right: 0; }
+  .pipeline li:nth-child(-n+2) { border-bottom: 1px solid var(--rule); }
+  .pipeline li:nth-child(2)::after { display: none; }
+  .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lessons, .links { grid-template-columns: minmax(0, 1fr); }
+  .links a { border-right: 0; border-bottom: 1px solid var(--rule); }
+  .links a:last-child { border-bottom: 0; }
+  footer.credits { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .g3 { grid-template-columns: minmax(0, 1fr); }
+  .g3.keep { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .g3.keep .chip { font-size: .56rem; left: 4px; top: 4px; }
+  .g2.stack { grid-template-columns: minmax(0, 1fr); }
+  .pipeline { grid-template-columns: minmax(0, 1fr); }
+  .pipeline li { border-right: 0; border-bottom: 1px solid var(--rule); }
+  .pipeline li:last-child { border-bottom: 0; }
+  .pipeline li::after { display: none; }
+  .spike .row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .spike .track { margin-right: 8.5rem; }
+  .spike .val { font-size: .62rem; }
+  footer.credits dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  footer.credits dd { margin-bottom: 10px; }
+  .readout { font-size: .6rem; }
+}
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" type="button" id="theme" aria-label="Switch colour theme">THEME</button>
+<div class="readout" id="readout" aria-hidden="true">TRACK 0000  00 / 08  0.000</div>
+
+<header class="hero" data-sec="00">
+  <div>
+    <div class="kicker rv"><span class="chip">CASE STUDY</span><span class="chip">ID 02</span><span class="chip">0.2 s × 8</span></div>
+    <h1 class="rv">Tiny <em>windows</em></h1>
+    <p class="dek rv">A blob-tracking look for a flashback that lasts 1.6 seconds. It took three attempts, one reference site and a frozen browser tab, and it only started working when I stopped asking a filter to see.</p>
+    <p class="meta rv"><b>Kishor</b> · design and direction, worked through with AI<br>for QuestRunner, teaser <b>USER ACTION PENDING</b> · September 2026</p>
+  </div>
+  <figure class="hero-video rv">
+    <div class="boxed">
+      <video src="assets/flashback.mp4" poster="assets/flashback-poster.jpg" width="540" height="960" autoplay muted loop playsinline preload="metadata" aria-label="The finished flashback: eight 0.2-second shutters with blob tracking"></video>
+    </div>
+    <figcaption><span class="chip">FB 1–8</span>The finished flashback, real speed, looping. Eight shutters, 6 frames each.</figcaption>
+  </figure>
+</header>
+
+<main>
+
+<!-- 01 ------------------------------------------------------------------ -->
+<section class="section" id="brief" data-sec="01">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">01</span><span class="chip">BRIEF</span><span class="coord">0.042 0.118</span></div>
+    <h2>Eight shutters and one note</h2>
+  </div>
+  <div class="split">
+    <div class="prose">
+      <p><em>USER ACTION PENDING</em> is the second teaser for QuestRunner. It's twenty-five seconds of someone stuck: a bed in the dark, a fridge opened and shut, a terminal waiting for input. Near the end an eye opens, and for a moment we see the other life. Reading. A hand reaching out. Rain on a pavement. A city at night.</p>
+      <p>That moment is a flashback of eight shutters, 0.2&nbsp;seconds each, a one-frame white flash on every cut. At that speed you don't read the shots. You get a texture. I wanted the texture to feel <em>observed</em>, as if something were scanning these moments and taking notes.</p>
+      <p>I'd pointed at <a href="https://geometric-art.com/" rel="noopener">geometric-art.com</a> early on as the flavour I meant: geometric art that reacts to the video under it. After the first pass missed, I wrote the note that became the brief:</p>
+      <blockquote class="note">“tiny distorted rectangles like tiny windows”<cite>my note, after the first pass</cite></blockquote>
+      <p>Everything below is how that sentence turned into a method. I worked through it with AI: I watched every render and said what was wrong; it wrote the code, measured things, and was wrong in interesting ways. Both of us were wrong more than once.</p>
+    </div>
+    <figure class="portrait">
+      <div class="tile"><span class="chip">FB 4</span><img src="assets/teaser-blobtrack.jpg" width="720" height="1280" loading="lazy" alt="A hand over pale grass, inverted, with white tracking boxes, connecting lines and small white number chips"></div>
+      <figcaption>Where it ended up. One frame of shutter 4: the boxes sit on the fingers, the chips read measurements, two windows are inverted.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 02 ------------------------------------------------------------------ -->
+<section class="section" id="glitch" data-sec="02">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">02</span><span class="chip">ATTEMPT 1</span><span class="coord">0.311 0.287</span></div>
+    <h2>A shader <em>can't look</em></h2>
+  </div>
+  <div class="split">
+    <div class="prose">
+      <p>The first reach was for what the video tool already had. There was a family of luminance shaders (engraving, crosshatch, halftone, dither), one per shutter. They did react to the picture, in the sense that bright areas became dense lines. But they re-render the whole frame as a pattern and flatten it to monochrome. It looked like an art filter, not like anything being measured.</p>
+      <p>After my note about tiny windows, the second reach was block displacement: a glitch shader that cuts the frame into small rectangles and shifts them. It took three passes to tune. The first mosaiced the whole image and turned it pink. The second still mushed it. The third, with pixelation at zero, left a clean picture with hundreds of tiny displaced blocks over it.</p>
+      <p>As a still it looked close. In motion it was obviously wrong. The rectangles live on a fixed lattice and move with noise. They land wherever the grid puts them, whatever the footage is doing, so a hand and a blank wall get the same treatment.</p>
+      <blockquote class="note">“its just dumbass pixels distorted/mosaic, but it doesnt react to object in videos”<cite>my note on that render, verbatim</cite></blockquote>
+      <p>It was a fair note. The useful part was realising why: reacting to content isn't a <em>parameter</em> that kind of effect has. No amount of tuning was going to get there. We had to start again from a method that measures the picture.</p>
+    </div>
+    <figure class="portrait">
+      <div class="tile"><span class="chip">v6</span><img src="assets/teaser-glitch.jpg" width="720" height="1280" loading="lazy" alt="The same inverted hand covered in a uniform scatter of small grey displaced blocks"></div>
+      <figcaption>Attempt 1, block displacement. The blocks are the same everywhere: on the hand, on the grass, on nothing.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 03 ------------------------------------------------------------------ -->
+<section class="section" id="reference" data-sec="03">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">03</span><span class="chip">REFERENCE</span><span class="coord">0.508 0.064</span></div>
+    <h2>Reading the reference properly</h2>
+  </div>
+  <div class="prose">
+    <p>So we went back to <a href="https://geometric-art.com/" rel="noopener">geometric-art.com</a> and actually read it, this time with a browser instead of a guess. Its <span class="mono">EDGE BOX ARCHITECTURE</span> preset was the closest thing to what I had in my head: boxes that sit on the edges in an image, thin lines linking them, small labels beside them. It looks like an instrument has been pointed at a photo.</p>
+    <p>The important thing wasn't the look, though. It was that the tool names its own pipeline in its interface. Read left to right, the panels describe a method:</p>
+  </div>
+  <ol class="pipeline rv" aria-label="The pipeline exposed by the reference tool's interface">
+    <li><span class="n">01</span><span class="t">FIELD EXTRACTION</span><p>Measure the image into a field of numbers.</p><span class="ours">attempt 2: Sobel edge energy<br>attempt 3: four masks</span></li>
+    <li><span class="n">02</span><span class="t">SHAPE SYSTEM</span><p>Put a shape wherever the measurement says.</p><span class="ours">attempt 2: grid peaks<br>attempt 3: connected components</span></li>
+    <li><span class="n">03</span><span class="t">CONNECTIONS</span><p>Link the shapes to each other.</p><span class="ours">nearest neighbours, a sparse chain</span></li>
+    <li><span class="n">04</span><span class="t">SIGNAL LAYERS</span><p>Label them with what was measured.</p><span class="ours">white chips: ID, position, area</span></li>
+  </ol>
+  <div class="prose">
+    <p>Measure, place, link, label. The glitch shader skipped the first step entirely, which is the whole reason it couldn't react. None of the site's code is used anywhere in this project. What I took from it is that four-step idea, and each attempt from here on is an independent build of it against our own footage.</p>
+  </div>
+</section>
+
+<!-- 04 ------------------------------------------------------------------ -->
+<section class="section" id="field" data-sec="04">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">04</span><span class="chip">ATTEMPT 2</span><span class="coord">0.662 0.402</span></div>
+    <h2>An edge field, <em>and the horizon</em></h2>
+  </div>
+  <div class="prose">
+    <p>The first honest attempt was a straight reading of that pipeline. Take the Sobel edge magnitude of each frame and average it into a grid of 22-pixel cells. That grid is the field. Pick the strongest cells greedily, suppressing each one's neighbours so boxes don't pile up, until there are 145 to 195 of them. Draw a box at each and fill it with the frame sampled a few pixels along that cell's own gradient, so the distortion inside a box depends on what's under it. Label each box with a hex ID and its measured energy, and link nearest neighbours with hairlines.</p>
+    <p>The first build normalised edge energy from minimum to maximum. That fails on any frame with one dominant contour. The strongest line in the frame sets the maximum, and everything else is scaled down against it. A horizon took the entire budget, while a face two stops darker scored zero. The first render had fifteen boxes strung along a skyline.</p>
+    <p>The fix was to score each cell half on its absolute energy and half on its energy <em>relative to its own neighbourhood</em>, both normalised between percentiles (p55 to p99.2) rather than extremes. The relative term puts boxes across a subject instead of along the hardest line. We also swapped out two plates, both a runner on flat grass, because a field has nothing to find in one hard horizon and grass.</p>
+  </div>
+  <figure class="fig-wide">
+    <div class="fig-grid g2 stack">
+      <div class="tile"><img src="assets/skyline-minmax.jpg" width="1280" height="720" loading="lazy" alt="Night skyline with small square boxes packed along the lit band of buildings"></div>
+      <div class="tile"><img src="assets/skyline-relative.jpg" width="1280" height="720" loading="lazy" alt="Same skyline with the boxes spread higher, some in the empty sky"></div>
+    </div>
+    <figcaption><span class="chip">RECONSTRUCTION</span>The same scoring, rebuilt on a free clip, because the original horizon frames were overwritten. Left: min–max packs every node into the lit band. Right: percentile plus relative spreads them, and in an empty sky starts measuring cloud noise. Either way, look at the boxes: every one is the same size.</figcaption>
+  </figure>
+  <div class="split">
+    <div class="prose">
+      <p>It did react. The boxes found the lit windows in the city, the tendons of a hand, the railing of a balcony. It was the first version that was about the footage at all.</p>
+      <p>It still looked like a mesh laid over the picture, not like the picture being read. My next note asked for three things:</p>
+      <blockquote class="note">“add connecting lines, some numbers with solid white as background, rectangles with random and more variable sizes”<cite>my note on the edge-field render</cite></blockquote>
+      <p>Lines and chips are drawing details. Variable size isn't. In a grid method <em>the grid decides the size</em>. A box is as big as a cell, give or take some jitter, because the thing being measured is a cell. To get a box the size of a building and one the size of a window in the same frame, the box has to come from the thing, not from the grid.</p>
+    </div>
+    <figure class="portrait">
+      <div class="tile"><span class="chip">v7</span><img src="assets/teaser-edgebox.jpg" width="720" height="1280" loading="lazy" alt="The inverted hand with dozens of tiny, nearly identical square boxes along its edges"></div>
+      <figcaption>Attempt 2 on shutter 4. Better: the boxes follow the fingers. But they're all one size, and the label text is too faint to read.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 05 ------------------------------------------------------------------ -->
+<section class="section" id="blobs" data-sec="05">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">05</span><span class="chip">ATTEMPT 3</span><span class="coord">0.274 0.733</span></div>
+    <h2>Let the thing <em>decide the box</em></h2>
+  </div>
+  <div class="prose">
+    <p>This time we looked up how the look is usually made instead of inventing one. Most of the tutorials and tools that produce it come back to TouchDesigner's Blob Track: find the distinct shapes in a frame, box each one, and follow it from frame to frame. It's an old, proven computer-vision idea, and it answers the size problem directly. We rebuilt it offline in Python.</p>
+    <h3>Detect: four masks</h3>
+    <p>Each frame is reduced to grey at a working resolution (540 px on the short side) and thresholded four ways. <b>Bright</b>: the top 10% of a lightly blurred image. <b>Dark</b>: the bottom 9%. <b>Edges</b>: Canny, dilated so that nearby edges fuse into regions. <b>Motion</b>: the difference from three frames back. Each mask is split into connected components, and every component is a candidate whose box is simply its own bounding box. A lit window gets a small box, a tower gets a tall one. That's the variable size, for free.</p>
+  </div>
+  <figure class="fig-wide">
+    <div class="tile"><img src="assets/crossing-masks.jpg" width="1280" height="723" loading="lazy" alt="Four panels: bright, dark, edge and motion masks of a street crossing, with red outlines around each connected component"></div>
+    <figcaption><span class="chip">4 MASKS</span>One frame of a busy crossing, split four ways. Red outlines are the components that survive the area limits. On a frame this dense the edge and motion masks merge into one big sheet, and most of it is too large to keep, so the bright and dark masks carry this frame. On calmer footage the balance shifts.</figcaption>
+  </figure>
+  <div class="split">
+    <div class="prose">
+      <p>Candidates are scored on size, local contrast, and double if they're moving. They're then picked with a quota per size class (6 large, 11 medium, 15 small), skipping any that overlap one already picked by more than 45%. The quota keeps a frame from filling with only big boxes or only specks.</p>
+      <h3>Track: IDs that stay put</h3>
+      <p>Each box is matched to last frame's boxes by overlap plus how close their centres are. A match keeps its ID and moves 55% of the way toward the new position, which smooths the jitter. So <span class="mono">ID 07</span> is the same tower for as long as the tower is there. Separately, a few dozen corner points are followed with Lucas-Kanade optical flow and drawn as small squares, so there's fine motion between the boxes too.</p>
+      <h3>Draw: the numbers are real</h3>
+      <p>Boxes get white outlines, with corner ticks on the large ones and a crosshair on some. Each links to its two nearest neighbours, and a sparse chain runs across the frame. The chips are solid white with black text, and they read actual measurements: an ID, the normalised centre, or the blob's kind and area. About 18% of boxes invert what's inside them and 12% show the frame shifted a few pixels. Those are the tiny windows from the note, finally in the right places.</p>
+      <p>Every “random” choice is a hash of the track ID, so a box keeps the same look for its whole life instead of flickering.</p>
+    </div>
+    <figure>
+      <div class="compare" style="--pos:50%">
+        <img src="assets/crossing-before.jpg" width="1280" height="720" loading="lazy" alt="Pedestrians crossing a busy Toronto intersection, untreated">
+        <div class="top"><img src="assets/crossing-after.jpg" width="1280" height="720" loading="lazy" alt="The same frame with blob tracking: boxes on people and signs, lines, white chips"></div>
+        <span class="chip l">SOURCE</span><span class="chip r">TRACKED</span>
+        <div class="bar"></div><span class="chip knob">⟷</span>
+        <input type="range" min="0" max="100" value="50" aria-label="Drag to compare the source frame with the tracked frame">
+      </div>
+      <figcaption><span class="chip">DRAG</span>Same frame, before and after. Free CC0 footage run through this repo's <span class="mono">blobtrack.py</span> at default settings.</figcaption>
+      <div class="tile" style="margin-top:18px">
+        <video src="assets/crossing.mp4" poster="assets/crossing-after.jpg" width="960" height="540" autoplay muted loop playsinline preload="metadata" aria-label="Four seconds of the crossing with blob tracking, boxes following pedestrians"></video>
+      </div>
+      <figcaption><span class="chip">4.2 s</span>In motion. The IDs follow people across the road.</figcaption>
+    </figure>
+  </div>
+  <figure class="fig-wide">
+    <div class="fig-grid g3 keep">
+      <div class="tile"><span class="chip">1 · GLITCH</span><img src="assets/teaser-glitch.jpg" width="720" height="1280" loading="lazy" alt="Attempt 1 on the hand plate"></div>
+      <div class="tile"><span class="chip">2 · FIELD</span><img src="assets/teaser-edgebox.jpg" width="720" height="1280" loading="lazy" alt="Attempt 2 on the hand plate"></div>
+      <div class="tile"><span class="chip">3 · BLOBS</span><img src="assets/teaser-blobtrack.jpg" width="720" height="1280" loading="lazy" alt="Attempt 3 on the hand plate"></div>
+    </div>
+    <figcaption><span class="chip">SAME PLATE</span>Three attempts on the same shutter. A lattice that ignores the hand, a grid that traces it, and boxes that come from it.</figcaption>
+  </figure>
+  <figure class="fig-wide">
+    <div class="tile"><img src="assets/skyline-blobs.jpg" width="1280" height="720" loading="lazy" alt="The night skyline with blob tracking: boxes of many sizes around towers and lit buildings"></div>
+    <figcaption><span class="chip">SIZE</span>The skyline from section 4 through the blob tracker. The tower gets a tall box, a lit sign gets a small one, and the empty sky mostly gets left alone.</figcaption>
+  </figure>
+</section>
+
+<!-- 06 ------------------------------------------------------------------ -->
+<section class="section" id="blend" data-sec="06">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">06</span><span class="chip">BLEND</span><span class="coord">0.700 0.860</span></div>
+    <h2>Making it sit <em>in</em> the picture</h2>
+  </div>
+  <div class="split">
+    <div class="prose">
+      <p>The shapes were right on the first render of this version. My note on it was mostly approval, with one change:</p>
+      <blockquote class="note">“the blob shapes are perfect now, but the color has to slightly blend (use screen blend mode with less opacity or whichever works)”<cite>my note on the first blob-tracking render</cite></blockquote>
+      <p>Pure white lines drawn over the frame read as a layer on top of the video. Screen blending makes them part of it. All strokes (boxes, lines, markers) are drawn white onto their own transparent layer, and then that layer is screened onto the frame once, at 0.70:</p>
+      <pre><span class="c">// per pixel, per channel, values 0..1</span>
+out = base + (1 − base) · stroke · 0.70</pre>
+      <p>Over a dark city the lines glow and take on the warmth of the lights. Over a pale plate they nearly vanish, which is right, because there's less contrast to report.</p>
+      <p>Two details mattered. First, the strokes need their own layer. Screening each line straight onto the frame means that wherever lines cross, they add up and brighten, and the whole thing goes flat. Second, the chips don't screen. Screening black changes nothing, so a screened chip's black text would simply disappear into the picture. The chips are a normal blend at 0.86, so the numbers stay sharp with a hint of the picture through the paper.</p>
+    </div>
+    <figure>
+      <div class="compare" style="--pos:50%">
+        <img src="assets/blend-v8.jpg" width="900" height="900" loading="lazy" alt="Crop of the hand shutter with bright, opaque white tracking lines">
+        <div class="top"><img src="assets/blend-v9.jpg" width="900" height="900" loading="lazy" alt="The same crop with the lines screen-blended and softer against the pale plate"></div>
+        <span class="chip l">OPAQUE</span><span class="chip r">SCREEN 0.70</span>
+        <div class="bar"></div><span class="chip knob">⟷</span>
+        <input type="range" min="0" max="100" value="50" aria-label="Drag to compare opaque strokes with screen-blended strokes">
+      </div>
+      <figcaption><span class="chip">v8 / v9</span>The same frame from two renders. On a pale plate the screened strokes step back and the chips stay legible.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 07 ------------------------------------------------------------------ -->
+<section class="section" id="browser" data-sec="07">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">07</span><span class="chip">PORT</span><span class="coord">0.138 0.180</span></div>
+    <h2>Taking it to <em>the browser</em></h2>
+  </div>
+  <div class="prose">
+    <p>The teaser shipped. But the effect lived in one script inside one video project, and I wanted to use it on anything: upload a clip, preview it, download it, nothing to install. That meant running it in a browser, and there were three ways to do that. Rather than argue about them we built all three on the same frames and measured.</p>
+  </div>
+  <div class="spike" id="spike">
+    <div class="row"><div class="name">Python, native<small>the reference</small></div><div class="track"><div class="bar" style="--w:27.2%"></div><span class="val" style="--w:27.2%">138 ms / frame</span></div></div>
+    <div class="row"><div class="name">OpenCV.js<small>a line-by-line JS port</small></div><div class="track"><div class="bar" style="--w:35.5%"></div><span class="val" style="--w:35.5%">180 ms · 100% match</span></div></div>
+    <div class="row"><div class="name">Pyodide<small>the same Python, in the browser</small></div><div class="track"><div class="bar" style="--w:100%"></div><span class="val" style="--w:100%">507 ms · 100% match</span></div></div>
+  </div>
+  <p class="spike-foot">1080 × 1920 frames, M-series Mac, Chrome. Pyodide also took 8.9 s to load before the first frame. “Match” means every box and every ID agreed with Python, mean overlap 1.000.</p>
+  <div class="split">
+    <div class="prose">
+      <p>Both ports reproduced Python exactly, box for box and ID for ID, so accuracy didn't decide it. Speed did. The OpenCV.js port runs at about 180 ms a frame, which means a ten-second clip takes about a minute. That's fine for process-then-play, and I'd rather have that than a nine-second blank screen before anything happens.</p>
+      <h3>The tab that froze</h3>
+      <p>The first time I opened the spike page, both outputs were blank and the automated browser just hung. There was no error and nothing in the console. The tab had stopped responding.</p>
+      <p>The cause is a small, nasty quirk. The OpenCV.js build exposes a global <code>cv</code> object that is also a <em>thenable</em>: it has a <code>then()</code> method, and that method resolves with <code>cv</code> itself. So <code>await cv</code> gets <code>cv</code>, sees it's thenable again, awaits it again, and never stops. It's an infinite microtask loop with no error, and the page never gets another turn to paint.</p>
+      <p>The fix is two lines: wait for the runtime's own callback, then delete the trap. The shipped module does exactly this, and it's written up as the first entry in the skill's list of traps, so nobody has to find it the way we did.</p>
+      <p>Two other porting details are written up there too, because an exact match depends on them. Python's <code>int()</code> truncates toward zero, while <code>Math.floor</code> moves negative offsets by a pixel. And percentiles have to interpolate the way numpy does, not by nearest rank. A parity test now runs the JS module against the Python reference in headless Chrome and fails below 95% agreement.</p>
+    </div>
+    <figure>
+<pre><span class="c">// what froze the tab</span>
+<span class="bad">await cv;</span>              <span class="c">// cv.then(resolve) → resolve(cv) → …forever</span>
+
+<span class="c">// what ships in blobtrack.js</span>
+if (!cv.Mat) await new Promise(r =&gt; {
+  cv.onRuntimeInitialized = r;
+});
+delete cv.then;          <span class="c">// never await cv again</span></pre>
+      <figcaption><span class="chip">TRAP 01</span>A thenable that resolves to itself. Awaiting it is an infinite loop that never throws.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 08 ------------------------------------------------------------------ -->
+<section class="section" id="result" data-sec="08">
+  <div class="sec-head rv">
+    <div class="label"><span class="chip">08</span><span class="chip">RESULT</span><span class="coord">0.950 0.912</span></div>
+    <h2>What shipped, <em>and what's left</em></h2>
+  </div>
+  <div class="prose">
+    <p>In the teaser the effect is on screen for 1.6 seconds. Most people will register it as a flicker of something technical and move on, and that's the job. Below are four of the eight plates as they went into the film.</p>
+  </div>
+  <figure class="fig-wide">
+    <div class="fig-grid g4">
+      <div class="tile"><span class="chip">FB 1</span><img src="assets/plate-1.jpg" width="540" height="960" loading="lazy" alt="A city at night with a clock tower, boxes around lit windows and buildings"></div>
+      <div class="tile"><span class="chip">FB 2</span><img src="assets/plate-2.jpg" width="540" height="960" loading="lazy" alt="An open book with a hand turning the page, boxes on the text and fingers"></div>
+      <div class="tile"><span class="chip">FB 7</span><img src="assets/plate-7.jpg" width="540" height="960" loading="lazy" alt="An open window onto a balcony, tall boxes on the railing bars"></div>
+      <div class="tile"><span class="chip">FB 8</span><img src="assets/plate-8.jpg" width="540" height="960" loading="lazy" alt="Looking down at a rainy pavement and a shoe, inverted, with scattered boxes"></div>
+    </div>
+    <figcaption><span class="chip">PLATES</span>Blob-tracked flashback plates from the teaser, 1080 × 1920, each 6 frames long.</figcaption>
+  </figure>
+  <div class="prose">
+    <p>What I'd take from this into the next effect:</p>
+  </div>
+  <ol class="lessons">
+    <li>If an effect never reads the picture, no setting will make it react to the picture. Check that before you start tuning.</li>
+    <li>Normalise on percentiles, not the minimum and maximum. One extreme value shouldn't get to set the scale for everything else.</li>
+    <li>Let the thing decide the box. Sizes that come from the content look measured. Sizes that come from a grid look like a pattern.</li>
+  </ol>
+  <div class="prose">
+    <p>The effect is now its own small project. There's a web app that runs it on any clip in the browser, a Python command-line tool, a browser module, and a skill for AI coding agents that picks the right one of those for whatever project it's dropped into. For tools I haven't touched, like TouchDesigner, After Effects or Unity, there's a written spec of the method.</p>
+  </div>
+  <nav class="links" aria-label="Project links">
+    <a href="../app/"><span class="chip">APP</span><strong>Try it on a video</strong><span class="d">Upload, process in the browser, preview, download.</span><span class="u">../app/ · run ./app/serve.sh first</span></a>
+    <a href="../skills/blob-tracking/"><span class="chip">SKILL</span><strong>The blob-tracking skill</strong><span class="d">CLI, Python module, browser module, method spec and the list of traps.</span><span class="u">../skills/blob-tracking/</span></a>
+    <a href="https://github.com/k1sh0r/blob-tracker" rel="noopener"><span class="chip">REPO</span><strong>Source on GitHub</strong><span class="d">Everything above, MIT licensed.</span><span class="u">github.com/k1sh0r/blob-tracker</span></a>
+  </nav>
+</section>
+
+</main>
+
+<footer class="credits" id="credits">
+  <h2>CREDITS</h2>
+  <dl>
+    <dt>Words, direction</dt><dd>Kishor. Built together with AI, which wrote the code and ran the measurements.</dd>
+    <dt>Teaser stills and clip</dt><dd>From <em>USER ACTION PENDING</em>, a QuestRunner teaser, 2026.</dd>
+    <dt>Crossing footage</dt><dd>“Diagonal crosswalk at Yonge &amp; Dundas in Toronto” by Raysonho @ Open Grid Scheduler / Grid Engine, 2011. Source: <a href="https://commons.wikimedia.org/wiki/File:DiagonalCrosswalkYongeDundas.webm" rel="noopener">Wikimedia Commons</a>. License: <a href="https://creativecommons.org/publicdomain/zero/1.0/" rel="noopener">CC0 1.0 Universal (public domain dedication)</a>. A 4.2 s excerpt, scaled to 1280 × 720 and run through <span class="mono">blobtrack.py</span>.</dd>
+    <dt>Skyline footage</dt><dd>“Shanghai Bund, Lujiazui Skyline Timelapse” by Yigang Yu, 2015. Source: <a href="https://commons.wikimedia.org/wiki/File:Shanghai_Bund,_Lujiazui_Skyline_Timelapse.webm" rel="noopener">Wikimedia Commons</a>, originally <a href="https://www.flickr.com/photos/133693764@N05/19938038713/" rel="noopener">Flickr</a>. License: <a href="https://creativecommons.org/publicdomain/zero/1.0/" rel="noopener">CC0 1.0 Universal (public domain dedication)</a>. Single frames, processed by the edge-field reconstruction and <span class="mono">blobtrack.py</span>.</dd>
+    <dt>Reference</dt><dd><a href="https://geometric-art.com/" rel="noopener">geometric-art.com</a>, EDGE BOX ARCHITECTURE. Described, not reproduced. No code or imagery from it is used.</dd>
+    <dt>Method</dt><dd>After TouchDesigner's Blob Track approach. Built on OpenCV and OpenCV.js.</dd>
+    <dt>Type</dt><dd>JetBrains Mono (SIL Open Font License), the same face the effect uses for its chips.</dd>
+  </dl>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement;
+
+  // theme toggle: system → opposite → back; remembered per viewer when storage allows
+  var btn = document.getElementById("theme");
+  function sysDark() { return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches; }
+  function current() { return root.getAttribute("data-theme") || (sysDark() ? "dark" : "light"); }
+  function label() { btn.textContent = current() === "dark" ? "LIGHT" : "DARK"; }
+  try { var saved = localStorage.getItem("cs-theme"); if (saved === "dark" || saved === "light") root.setAttribute("data-theme", saved); } catch (e) {}
+  label();
+  btn.addEventListener("click", function () {
+    var next = current() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("cs-theme", next); } catch (e) {}
+    label();
+  });
+
+  // reveal on scroll
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var rv = document.querySelectorAll(".rv");
+  if ("IntersectionObserver" in window && !reduce) {
+    var io = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } });
+    }, { rootMargin: "0px 0px -8% 0px" });
+    rv.forEach(function (el) { io.observe(el); });
+  } else {
+    rv.forEach(function (el) { el.classList.add("in"); });
+  }
+
+  // spike bars grow when seen
+  var spike = document.getElementById("spike");
+  if ("IntersectionObserver" in window && !reduce) {
+    var so = new IntersectionObserver(function (es) {
+      if (es[0].isIntersecting) { spike.classList.add("on"); so.disconnect(); }
+    }, { threshold: .4 });
+    so.observe(spike);
+  } else { spike.classList.add("on"); }
+
+  // compare sliders
+  document.querySelectorAll(".compare").forEach(function (c) {
+    var r = c.querySelector("input");
+    function set() { c.style.setProperty("--pos", r.value + "%"); }
+    r.addEventListener("input", set); set();
+  });
+
+  // videos: honour reduced motion
+  if (reduce) {
+    document.querySelectorAll("video[autoplay]").forEach(function (v) {
+      v.removeAttribute("autoplay"); v.pause(); v.controls = true;
+    });
+  }
+
+  // readout: the effect's own bottom-left chip, measuring the page
+  var ro = document.getElementById("readout");
+  var secs = Array.prototype.slice.call(document.querySelectorAll("[data-sec]"));
+  var frame = 0, ticking = false;
+  function pad(n, w) { n = String(n); while (n.length < w) n = "0" + n; return n; }
+  function update() {
+    ticking = false;
+    var y = window.scrollY, h = document.documentElement.scrollHeight - window.innerHeight;
+    var p = h > 0 ? Math.min(1, Math.max(0, y / h)) : 0;
+    var mid = y + window.innerHeight * 0.4, cur = "00";
+    secs.forEach(function (s) { if (s.offsetTop <= mid) cur = s.getAttribute("data-sec"); });
+    frame = Math.round(p * 639);
+    ro.textContent = "TRACK " + pad(frame, 4) + "  " + cur + " / 08  " + p.toFixed(3);
+  }
+  window.addEventListener("scroll", function () { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
+  window.addEventListener("resize", update);
+  update();
+})();
+</script>
+</body>
+</html>
