@@ -414,7 +414,7 @@ footer.credits dd { margin: 0; overflow-wrap: anywhere; }
   <div class="prose">
     <p>The first honest attempt was a straight reading of that pipeline. Take the Sobel edge magnitude of each frame and average it into a grid of 22-pixel cells. That grid is the field. Pick the strongest cells greedily, suppressing each one's neighbours so boxes don't pile up, until there are 145 to 195 of them. Draw a box at each and fill it with the frame sampled a few pixels along that cell's own gradient, so the distortion inside a box depends on what's under it. Label each box with a hex ID and its measured energy, and link nearest neighbours with hairlines.</p>
     <p>The first build normalised edge energy from minimum to maximum. That fails on any frame with one dominant contour. The strongest line in the frame sets the maximum, and everything else is scaled down against it. A horizon took the entire budget, while a face two stops darker scored zero. The first render had fifteen boxes strung along a skyline.</p>
-    <p>The fix was to score each cell half on its absolute energy and half on its energy <em>relative to its own neighbourhood</em>, both normalised between percentiles (p55 to p99.2) rather than extremes. The relative term puts boxes across a subject instead of along the hardest line. We also swapped out two plates, both a runner on flat grass, because a field has nothing to find in one hard horizon and grass.</p>
+    <p>The fix was to weight each cell's score 55% on its absolute energy and 45% on its energy <em>relative to its own neighbourhood</em>, both normalised between percentiles (p55 to p99.2) rather than extremes. The relative term puts boxes across a subject instead of along the hardest line. We also swapped out two plates, both a runner on flat grass, because a field has nothing to find in one hard horizon and grass.</p>
   </div>
   <figure class="fig-wide">
     <div class="fig-grid g2 stack">
@@ -458,7 +458,7 @@ footer.credits dd { margin: 0; overflow-wrap: anywhere; }
       <h3>Track: IDs that stay put</h3>
       <p>Each box is matched to last frame's boxes by overlap plus how close their centres are. A match keeps its ID and moves 55% of the way toward the new position, which smooths the jitter. So <span class="mono">ID 07</span> is the same tower for as long as the tower is there. Separately, a few dozen corner points are followed with Lucas-Kanade optical flow and drawn as small squares, so there's fine motion between the boxes too.</p>
       <h3>Draw: the numbers are real</h3>
-      <p>Boxes get white outlines, with corner ticks on the large ones and a crosshair on some. Each links to its two nearest neighbours, and a sparse chain runs across the frame. The chips are solid white with black text, and they read actual measurements: an ID, the normalised centre, or the blob's kind and area. About 18% of boxes invert what's inside them and 12% show the frame shifted a few pixels. Those are the tiny windows from the note, finally in the right places.</p>
+      <p>Boxes get near-white outlines, with corner ticks on any box more than 90 px across (at 1080 wide) and a crosshair on some. Each links to its two nearest neighbours in a mid grey, and a fainter grey chain runs across the frame; the corner-point squares sit in between. The chips are solid white with black text, and they read actual measurements: an ID, the normalised centre, or the blob's kind and area. About 18% of boxes invert what's inside them and 12% show the frame shifted a few pixels. Those are the tiny windows from the note, finally in the right places.</p>
       <p>Every “random” choice is a hash of the track ID, so a box keeps the same look for its whole life instead of flickering.</p>
     </div>
     <figure>
@@ -500,7 +500,7 @@ footer.credits dd { margin: 0; overflow-wrap: anywhere; }
     <div class="prose">
       <p>The shapes were right on the first render of this version. My note on it was mostly approval, with one change:</p>
       <blockquote class="note">“the blob shapes are perfect now, but the color has to slightly blend (use screen blend mode with less opacity or whichever works)”<cite>my note on the first blob-tracking render</cite></blockquote>
-      <p>Pure white lines drawn over the frame read as a layer on top of the video. Screen blending makes them part of it. All strokes (boxes, lines, markers) are drawn white onto their own transparent layer, and then that layer is screened onto the frame once, at 0.70:</p>
+      <p>Light lines drawn straight over the frame read as a layer on top of the video. Screen blending makes them part of it. All strokes (boxes, lines, markers) are drawn in shades from white to dark grey onto their own layer: box outlines and ticks nearly white, the corner squares light grey, neighbour links mid grey, the chain and marker links faint. Then that layer is screened onto the frame once, at 0.70:</p>
       <pre><span class="c">// per pixel, per channel, values 0..1</span>
 out = base + (1 − base) · stroke · 0.70</pre>
       <p>Over a dark city the lines glow and take on the warmth of the lights. Over a pale plate they nearly vanish, which is right, because there's less contrast to report.</p>
