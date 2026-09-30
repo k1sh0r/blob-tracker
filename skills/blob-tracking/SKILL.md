@@ -83,8 +83,11 @@ Then, for a file `clip.mp4`:
 - Other flags: `--start SEC --duration SEC` (a section), `--crf N` (x264
   quality, default 16, lower is better), `--no-audio`, and every parameter
   below as `--name value`; `--help` lists them.
-- It prints `clip-blobtrack.mp4: N frames`, or exits 1 with one line
-  `blobtrack: ...` on any error.
+- It prints `clip-blobtrack.mp4: N frames` and exits 0. A malformed
+  command line (unknown flag, `--crf abc`, a missing `-o`) exits 2 with
+  argparse's usage and a `blobtrack.py: error: ...` line. Any other failure (bad
+  input, an existing output, a parameter out of range, a write error)
+  exits 1 with one line `blobtrack: ...`.
 - The first run after installing is slower (Python loads the packages for
   the first time).
 
@@ -146,8 +149,12 @@ print(out_dir, bt.last_tracks)  # tracks: [{id, x, y, w, h, kind, a, age}] in ou
   raises `OutputExistsError`, a `BlobTrackError`).
 - `last_tracks` / `last_points` after each `process()` are the per-frame
   data for drawing the overlay in another tool (path D).
-- Bad parameters raise `BlobTrackError` (a `ValueError`); unknown parameter
-  names raise `TypeError`.
+- All the module's own errors are `BlobTrackError` (a `ValueError`). Two
+  subclasses carry details: `ParamError` for a bad parameter (`.param` is
+  its name, e.g. `"small"` or `"crf"`; the message starts with it) and
+  `OutputExistsError` from `run()` (`.path` is the existing file). Unknown
+  parameter names raise `TypeError`. The errors pickle, so they cross
+  `multiprocessing` intact.
 
 ### C. Browser / JS project
 

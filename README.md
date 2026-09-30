@@ -72,8 +72,10 @@ with closing(read_frames("in.mp4", info)) as frames:
 run("in.mp4", "out.mp4", params={"small": 25})   # whole file with audio, like the CLI
 ```
 
-`run()` refuses an existing output unless you pass `overwrite=True`. Bad
-parameters raise `BlobTrackError` (a `ValueError`).
+Errors are `BlobTrackError` (a `ValueError`). A bad parameter raises the
+subclass `ParamError`, whose `.param` names it (`"small"`, `"crf"`...).
+`run()` refuses an existing output unless you pass `overwrite=True`,
+raising the subclass `OutputExistsError` (`.path` is the file).
 
 ## Browser module
 
@@ -142,6 +144,10 @@ npm run test:app      # web app end to end: upload, process, check the MP4
 detections in `tests/fixtures/` were made with. Both npm tests drive the
 installed Google Chrome; `test:app` also needs `ffmpeg`, and `test:parity`
 adds a Python side-by-side image when `.venv` exists.
+
+One pytest test is skipped unless `BLOBTRACK_TEASER_DIR` points at the
+original teaser tool the effect was extracted from. That tool is private
+and not in this repo, so the skip is expected.
 
 ## Notes
 
